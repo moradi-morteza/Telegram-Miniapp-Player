@@ -19,6 +19,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.util.Log;
@@ -39,6 +40,7 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ContactsController;
 import org.telegram.messenger.Emoji;
 import org.telegram.messenger.FileLog;
+import org.telegram.messenger.ImageReceiver;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessageObject;
 import org.telegram.messenger.MessagesController;
@@ -57,6 +59,7 @@ import org.telegram.ui.LaunchActivity;
 import org.telegram.ui.bots.BotButtons;
 import org.telegram.ui.bots.BotSensors;
 import org.telegram.ui.bots.BotWebViewAttachedSheet;
+import org.telegram.ui.bots.BotWebViewMediaSession;
 import org.telegram.ui.web.BotWebViewContainer;
 import org.telegram.ui.bots.BotWebViewSheet;
 import org.telegram.ui.bots.WebViewRequestProps;
@@ -145,6 +148,19 @@ public class BottomSheetTabs extends FrameLayout {
                 doNotDismiss = false;
             }, 220);
         }
+    }
+
+    public boolean reopenMediaTab(int account, long botId) {
+        final ArrayList<WebTabData> accountTabs = getTabs(account);
+        for (int i = 0; i < accountTabs.size(); i++) {
+            WebTabData tab = accountTabs.get(i);
+            if (tab.hasMedia && tab.props != null && tab.props.botId == botId) {
+                setCurrentAccount(account);
+                openTab(tab);
+                return true;
+            }
+        }
+        return false;
     }
 
     public WebTabData tryReopenTab(WebViewRequestProps props) {
@@ -504,10 +520,32 @@ public class BottomSheetTabs extends FrameLayout {
 
     private boolean closeRippleHit;
     private boolean hit;
+    private boolean playPauseHit;
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         return touchEvent(event.getAction(), event.getX(), event.getY()) || super.onTouchEvent(event);
+    }
+
+    // Sends the play/pause toggle straight to the Mini App's still-running (preserved)
+    // WebView. The actual mediaPlaying flip and redraw happen when the resulting
+    // web_app_set_media_playback_state event comes back through the host sheet's Delegate
+    // (see syncTabMediaTitle()), same as a tap on the WebView-page bar itself -- not applied
+    // optimistically here.
+    private void togglePlayPause(WebTabData tab) {
+        if (tab == null || tab.props == null) return;
+        BotWebViewMediaSession session = BotWebViewMediaSession.find(tab.props.currentAccount, tab.props.botId);
+        if (session != null) {
+            session.requestPlayPause(!tab.mediaPlaying);
+            return;
+        }
+        if (tab.webView == null) return;
+        try {
+            org.json.JSONObject data = new org.json.JSONObject().put("is_playing", !tab.mediaPlaying);
+            tab.webView.evaluateJS("window.Telegram.WebView.receiveEvent('media_playback_control_requested', " + data + ");");
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
     }
 
     public boolean touchEvent(int action, float x, float y) {
@@ -522,16 +560,20 @@ public class BottomSheetTabs extends FrameLayout {
                 getTabBounds(rect, drawable.getPosition());
                 if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
                     closeRippleHit = drawable.closeRipple.getBounds().contains((int) (x - rect.left), (int) (y - rect.centerY()));
-                    hit = !closeRippleHit && rect.contains(x, y);
+                    playPauseHit = !closeRippleHit && drawable.hitsPlayPauseIcon(rect, x, y);
+                    hit = !closeRippleHit && !playPauseHit && rect.contains(x, y);
                     drawable.closeRipple.setState(closeRippleHit ? new int[]{android.R.attr.state_pressed, android.R.attr.state_enabled} : new int[] {});
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                     if (hit && action == MotionEvent.ACTION_UP) {
                         click();
                     } else if (closeRippleHit && action == MotionEvent.ACTION_UP) {
                         removeTab(lastTab, success -> {});
+                    } else if (playPauseHit && action == MotionEvent.ACTION_UP) {
+                        togglePlayPause(lastTab);
                     }
                     closeRippleHit = false;
                     hit = false;
+                    playPauseHit = false;
                     drawable.closeRipple.setState(new int[] {});
                 }
                 for (int i = 0; i < tabDrawables.size(); ++i) {
@@ -542,12 +584,14 @@ public class BottomSheetTabs extends FrameLayout {
             } else {
                 hit = false;
                 closeRippleHit = false;
+                playPauseHit = false;
             }
         } else {
             hit = false;
             closeRippleHit = false;
+            playPauseHit = false;
         }
-        return hit || closeRippleHit;
+        return hit || closeRippleHit || playPauseHit;
     }
 
     public void click() {
@@ -750,10 +794,49 @@ public class BottomSheetTabs extends FrameLayout {
         private final Text title;
         private Text overrideTitle;
 
+        // Blurred cover-art background for a tab with active media. Loaded through a
+        // lightweight private ImageReceiver (this drawable isn't a real View, so it can't
+        // use BackupImageView) and blurred once via Utilities.stackBlurBitmapMax, cached by
+        // URL so it doesn't reload/reblur every frame.
+        private final ImageReceiver coverReceiver = new ImageReceiver(null);
+        private String coverUrl;
+        private Bitmap coverBlurred;
+        private final Paint coverPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Paint coverScrimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Rect coverSrcRect = new Rect();
+
+        // Single-line "Title  ·  0:03 / 4:59" (current / total, no minus sign), rebuilt only
+        // when the underlying string actually changes.
+        private String combinedTitleString;
+        private Text combinedTitleText;
+        private String artistString;
+        private Text artistText;
+        private boolean mediaTickScheduled;
+
+        // Play/pause icon (and a loading arc in its place while buffering) drawn next to
+        // the expand ("arrow up") icon, media tabs only.
+        private Drawable playPauseDrawable;
+        private boolean playPauseDrawableIsPlaying;
+        private int playPauseDrawableColor = Color.WHITE;
+        private final Paint loadingArcPaint = new Paint(Paint.ANTI_ALIAS_FLAG) {{
+            setStyle(Paint.Style.STROKE);
+            setStrokeWidth(dp(2));
+            setStrokeCap(Paint.Cap.ROUND);
+        }};
+        private final RectF loadingArcRect = new RectF();
+
         public TabDrawable(View view, WebTabData tab) {
             parentView = view;
             this.tab = tab;
             closeRipple.setCallback(view);
+
+            coverReceiver.setDelegate((receiver, set, thumb, memCache) -> {
+                if (set) {
+                    Bitmap bitmap = receiver.getBitmap();
+                    coverBlurred = bitmap == null ? null : Utilities.stackBlurBitmapMax(bitmap);
+                    parentView.invalidate();
+                }
+            });
 
             iconPaint.setStyle(Paint.Style.STROKE);
             iconPaint.setStrokeJoin(Paint.Join.ROUND);
@@ -831,7 +914,80 @@ public class BottomSheetTabs extends FrameLayout {
         private final Path closePath = new Path();
         private final Path expandPath = new Path();
 
+        private void updateCover(String url) {
+            if (TextUtils.equals(url, coverUrl)) return;
+            coverUrl = url;
+            coverBlurred = null;
+            if (TextUtils.isEmpty(url)) {
+                coverReceiver.setImageBitmap((Bitmap) null);
+            } else {
+                coverReceiver.setImage(url, "200_200", null, "jpg", 0);
+            }
+        }
+
+        // Two lines for a media tab, both smaller than the normal 17sp single-line title so
+        // they fit inside the pill's unchanged height (bounds/getTabBounds() are untouched
+        // -- only these two Text sizes and their small +/- offset from bounds.centerY()
+        // change): line 1 "Title  ·  0:03 / 4:59", line 2 the artist name.
+        private static final int MEDIA_TITLE_SIZE = 13;
+        private static final int MEDIA_ARTIST_SIZE = 11;
+        private static final int MEDIA_LINE_OFFSET = 7;
+
+        private void updateCombinedTitle() {
+            if (!tab.hasMedia) {
+                combinedTitleText = null;
+                combinedTitleString = null;
+                artistText = null;
+                artistString = null;
+                return;
+            }
+            String base = tab.getTitle();
+            String s = base;
+            if (tab.mediaDurationMs > 0) {
+                final long position = tab.getMediaPositionMs();
+                s = base + "  ·  " + AndroidUtilities.formatShortDuration((int) (position / 1000)) + " / " + AndroidUtilities.formatShortDuration((int) (tab.mediaDurationMs / 1000));
+                if (tab.mediaPlaying && !tab.mediaLoading && position < tab.mediaDurationMs && !mediaTickScheduled) {
+                    mediaTickScheduled = true;
+                    parentView.postDelayed(() -> {
+                        mediaTickScheduled = false;
+                        parentView.invalidate();
+                    }, Math.max(50, 1000 - position % 1000));
+                }
+            }
+            if (!TextUtils.equals(s, combinedTitleString)) {
+                combinedTitleString = s;
+                combinedTitleText = new Text(Emoji.replaceEmoji(s, getTextPaint().getFontMetricsInt(), false), MEDIA_TITLE_SIZE, AndroidUtilities.bold());
+            }
+            final String artist = TextUtils.isEmpty(tab.mediaArtist) ? null : tab.mediaArtist;
+            if (!TextUtils.equals(artist, artistString)) {
+                artistString = artist;
+                artistText = artist == null ? null : new Text(Emoji.replaceEmoji(artist, getTextPaint().getFontMetricsInt(), false), MEDIA_ARTIST_SIZE);
+            }
+        }
+
+        static float expandIconCx(RectF bounds) {
+            return bounds.right - dp(22 - 4 + 12.66f) + dp(6.33f);
+        }
+
+        static float playPauseIconCx(RectF bounds) {
+            return bounds.right - dp(22 - 4 + 12.66f) - dp(34);
+        }
+
+        public boolean hitsExpandIcon(RectF bounds, float x, float y) {
+            final float cx = expandIconCx(bounds);
+            return Math.abs(x - cx) <= dp(20) && Math.abs(y - bounds.centerY()) <= dp(20);
+        }
+
+        public boolean hitsPlayPauseIcon(RectF bounds, float x, float y) {
+            if (!tab.hasMedia || tab.mediaLoading) return false;
+            final float cx = playPauseIconCx(bounds);
+            return Math.abs(x - cx) <= dp(18) && Math.abs(y - bounds.centerY()) <= dp(18);
+        }
+
         public void draw(Canvas canvas, RectF bounds, float r, float alpha, float contentAlpha) {
+            updateCover(tab.hasMedia ? tab.mediaCoverUrl : null);
+            updateCombinedTitle();
+
             final int backgroundColor = ColorUtils.blendARGB(this.backgroundColor, this.tabColor, expandProgress);
             backgroundPaint.setColor(backgroundColor);
             backgroundPaint.setAlpha((int) (0xFF * alpha));
@@ -843,6 +999,30 @@ public class BottomSheetTabs extends FrameLayout {
             rectPath.addRoundRect(bounds, radii, Path.Direction.CW);
             canvas.drawPath(rectPath, backgroundPaint);
 
+            if (coverBlurred != null) {
+                canvas.save();
+                canvas.clipPath(rectPath);
+                coverPaint.setAlpha((int) (0xFF * alpha));
+                // Center-crop (like CSS background-size:cover) instead of stretching the
+                // (roughly square) cover art to the pill's wide aspect ratio.
+                final float bw = coverBlurred.getWidth(), bh = coverBlurred.getHeight();
+                final float boundsAspect = bounds.width() / bounds.height();
+                final float bitmapAspect = bw / bh;
+                if (bitmapAspect > boundsAspect) {
+                    final float cw = bh * boundsAspect;
+                    final int left = (int) ((bw - cw) / 2f);
+                    coverSrcRect.set(left, 0, left + (int) cw, (int) bh);
+                } else {
+                    final float ch = bw / boundsAspect;
+                    final int top = (int) ((bh - ch) / 2f);
+                    coverSrcRect.set(0, top, (int) bw, top + (int) ch);
+                }
+                canvas.drawBitmap(coverBlurred, coverSrcRect, bounds, coverPaint);
+                coverScrimPaint.setColor(Theme.multAlpha(0x66000000, alpha));
+                canvas.drawRect(bounds, coverScrimPaint);
+                canvas.restore();
+            }
+
             if (progress > 0 && expandProgress > 0 && alpha > 0) {
                 canvas.save();
                 canvas.clipPath(rectPath);
@@ -851,7 +1031,7 @@ public class BottomSheetTabs extends FrameLayout {
                 canvas.restore();
             }
 
-            final float isDark = lerp(backgroundIsDark ? 1f : 0f, tabIsDark ? 1f : 0f, expandProgress);
+            final float isDark = coverBlurred != null ? 1f : lerp(backgroundIsDark ? 1f : 0f, tabIsDark ? 1f : 0f, expandProgress);
             final int iconColor = ColorUtils.blendARGB(0xFF000000, 0xFFFFFFFF, isDark);
 
             iconPaint.setColor(iconColor);
@@ -883,6 +1063,31 @@ public class BottomSheetTabs extends FrameLayout {
             iconPaint.setAlpha((int) (0xFF * alpha * contentAlpha * (1f - expandProgress)));
             canvas.drawPath(expandPath, iconPaint);
             canvas.restore();
+
+            if (tab.hasMedia) {
+                final float cx = playPauseIconCx(bounds), cy = bounds.centerY();
+                final int sz = dp(20);
+                if (tab.mediaLoading) {
+                    loadingArcPaint.setColor(iconColor);
+                    loadingArcPaint.setAlpha((int) (0xFF * alpha * contentAlpha * (1f - expandProgress)));
+                    loadingArcRect.set(cx - sz / 2f, cy - sz / 2f, cx + sz / 2f, cy + sz / 2f);
+                    final float rotation = (SystemClock.uptimeMillis() % 1000) / 1000f * 360f;
+                    canvas.drawArc(loadingArcRect, rotation, 270, false, loadingArcPaint);
+                    parentView.invalidate();
+                } else {
+                    if (playPauseDrawable == null || playPauseDrawableIsPlaying != tab.mediaPlaying) {
+                        playPauseDrawableIsPlaying = tab.mediaPlaying;
+                        playPauseDrawable = parentView.getContext().getResources().getDrawable(tab.mediaPlaying ? R.drawable.ic_action_pause : R.drawable.ic_action_play).mutate();
+                        playPauseDrawableColor = iconColor + 1;
+                    }
+                    if (playPauseDrawableColor != iconColor) {
+                        playPauseDrawable.setColorFilter(new PorterDuffColorFilter(playPauseDrawableColor = iconColor, PorterDuff.Mode.SRC_IN));
+                    }
+                    playPauseDrawable.setAlpha((int) (0xFF * alpha * contentAlpha * (1f - expandProgress)));
+                    playPauseDrawable.setBounds((int) (cx - sz / 2f), (int) (cy - sz / 2f), (int) (cx + sz / 2f), (int) (cy + sz / 2f));
+                    playPauseDrawable.draw(canvas);
+                }
+            }
 
             int leftPadding = 0;
             if (favicon != null) {
@@ -923,14 +1128,21 @@ public class BottomSheetTabs extends FrameLayout {
                 leftPadding = w - dp(2);
             }
 
+            final Text titleToDraw = combinedTitleText != null ? combinedTitleText : title;
+            final float titleCy = artistText != null ? bounds.centerY() - dp(MEDIA_LINE_OFFSET) : bounds.centerY();
             if (overrideTitle != null) {
                 overrideTitle
                     .ellipsize((int) (bounds.width() - dp(100) - leftPadding))
-                    .draw(canvas, bounds.left + dp(60) + leftPadding, bounds.centerY(), iconColor, (1f - expandProgress) * alpha * contentAlpha);
+                    .draw(canvas, bounds.left + dp(60) + leftPadding, titleCy, iconColor, (1f - expandProgress) * alpha * contentAlpha);
             }
-            title
+            titleToDraw
                 .ellipsize((int) (bounds.width() - dp(100) - leftPadding))
-                .draw(canvas, bounds.left + dp(60) + leftPadding, bounds.centerY(), iconColor, (overrideTitle == null ? 1f : expandProgress) * alpha * contentAlpha);
+                .draw(canvas, bounds.left + dp(60) + leftPadding, titleCy, iconColor, (overrideTitle == null ? 1f : expandProgress) * alpha * contentAlpha);
+            if (artistText != null) {
+                artistText
+                    .ellipsize((int) (bounds.width() - dp(100) - leftPadding))
+                    .draw(canvas, bounds.left + dp(60) + leftPadding, bounds.centerY() + dp(MEDIA_LINE_OFFSET), Theme.multAlpha(iconColor, 0.65f), alpha * contentAlpha);
+            }
         }
 
     }
@@ -993,6 +1205,28 @@ public class BottomSheetTabs extends FrameLayout {
 
         public boolean orientationLocked;
 
+        // Mini App's MediaPlayer bridge state, kept live while minimized (see
+        // BotWebViewSheet/BotWebViewAttachedSheet's syncTabMediaTitle()).
+        public boolean hasMedia;
+        public String mediaTitle;
+        public String mediaArtist;
+        public String mediaCoverUrl;
+        public long mediaPositionMs;
+        public long mediaPositionUpdatedAtMs;
+        public long mediaDurationMs;
+        public float mediaPlaybackRate = 1f;
+        public boolean mediaPlaying;
+        public boolean mediaLoading;
+        public boolean mediaBarEnabled = true;
+
+        public long getMediaPositionMs() {
+            long position = mediaPositionMs;
+            if (mediaPlaying && !mediaLoading && mediaPositionUpdatedAtMs > 0) {
+                position += (long) ((SystemClock.elapsedRealtime() - mediaPositionUpdatedAtMs) * mediaPlaybackRate);
+            }
+            return Math.max(0, mediaDurationMs > 0 ? Math.min(position, mediaDurationMs) : position);
+        }
+
         public long getBotId() {
             if (props == null) return 0;
             return props.botId;
@@ -1000,6 +1234,10 @@ public class BottomSheetTabs extends FrameLayout {
 
         public void destroy() {
             try {
+                if (props != null) {
+                    BotWebViewMediaSession session = BotWebViewMediaSession.find(props.currentAccount, props.botId);
+                    if (session != null) session.release();
+                }
                 if (webView != null) {
                     webView.destroy();
                     webView = null;
@@ -1017,6 +1255,9 @@ public class BottomSheetTabs extends FrameLayout {
         }
 
         public String getTitle() {
+            if (hasMedia && !TextUtils.isEmpty(mediaTitle)) {
+                return mediaTitle;
+            }
             if (isWeb || articleViewer != null) {
                 if (TextUtils.isEmpty(title))
                     return getString(R.string.WebEmpty);

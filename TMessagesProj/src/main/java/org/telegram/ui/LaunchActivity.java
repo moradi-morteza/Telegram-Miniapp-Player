@@ -236,6 +236,7 @@ import org.telegram.ui.Wallet.GramWalletStorageAuth;
 import org.telegram.ui.Wallet.WalletActivity;
 import org.telegram.ui.Wallet.WalletSendSelectSender;
 import org.telegram.ui.bots.BotWebViewAttachedSheet;
+import org.telegram.ui.bots.BotWebViewMediaSession;
 import org.telegram.ui.bots.BotWebViewSheet;
 import org.telegram.ui.bots.WebViewRequestProps;
 import org.webrtc.voiceengine.WebRtcAudioTrack;
@@ -1573,6 +1574,8 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         boolean newContactAlert = false;
         boolean scanQr = false;
         boolean openBot = false;
+        boolean openMediaBot = BotWebViewMediaSession.ACTION_OPEN.equals(action);
+        long mediaBotId = openMediaBot ? intent.getLongExtra("bot_id", 0) : 0;
         long botId = 0;
         long botType = -1;
         String searchQuery = null;
@@ -3290,6 +3293,8 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                     rightActionBarLayout.rebuildFragments(INavigationLayout.REBUILD_FLAG_REBUILD_LAST);
                 }
                 pushOpened = true;
+            } else if (openMediaBot && mediaBotId != 0) {
+                pushOpened = BotWebViewSheet.reopenSheetForMedia(intentAccount[0], mediaBotId);
             } else if (openBot) {
                 processAttachedMenuBotFromShortcut(botId);
                 pushOpened = false;

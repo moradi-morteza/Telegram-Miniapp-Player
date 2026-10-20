@@ -531,6 +531,18 @@
             android:foregroundServiceType="mediaPlayback"
         />
         <service
+            android:name="org.telegram.ui.bots.BotWebViewMediaService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback"
+        />
+        <receiver android:name="org.telegram.ui.bots.BotWebViewMediaReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="org.telegram.webapp.media.PLAY" />
+                <action android:name="org.telegram.webapp.media.PAUSE" />
+            </intent-filter>
+        </receiver>
+        <service
             android:name=".MusicBrowserService"
             android:exported="true"
             android:foregroundServiceType="mediaPlayback"

@@ -1026,6 +1026,11 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
 
     public void reload() {
         NotificationCenter.getInstance(currentAccount).doOnIdle(() -> {
+            // A reloaded document has no relationship to the page that created the current
+            // media session. Tear it down before the new page can register fresh state.
+            if (delegate != null) {
+                delegate.onMediaMetadataClear();
+            }
             if (isSettingsButtonVisible) {
                 isSettingsButtonVisible = false;
                 if (delegate != null) {
@@ -1112,6 +1117,10 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
 
     private boolean preserving;
     public void preserveWebView() {
+        preserveWebView(false);
+    }
+
+    public void preserveWebView(boolean preserveMediaBridge) {
         d("preserveWebView");
         preserving = true;
         if (bot) {
@@ -1119,6 +1128,9 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
             documentGeneration++;
         }
         if (webView != null) {
+            if (bot && preserveMediaBridge) {
+                webView.preserveMediaBridge(delegate, restrictBridgeToOrigin, trustedOrigin);
+            }
             webView.setContainers(null, null);
             webView.setCloseListener(null);
         }
@@ -1448,6 +1460,8 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                         final BotWebViewContainer container = bridgeWebView.botWebViewContainer;
                         if (view == bridgeWebView && container != null) {
                             container.onBotWebMessage(view, message, sourceOrigin);
+                        } else if (view == bridgeWebView) {
+                            bridgeWebView.onPreservedMediaMessage(message, sourceOrigin);
                         }
                     }
             );
@@ -1504,6 +1518,51 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
         } catch (JSONException e) {
             FileLog.e(e);
         }
+    }
+
+    /**
+     * Dispatches the only bridge events allowed while a Mini App WebView is preserved in a tab.
+     * All other WebApp APIs remain detached with their host sheet.
+     */
+    private static boolean dispatchPreservedMediaEvent(Delegate delegate, String eventType, String eventData) {
+        if (delegate == null) return false;
+        try {
+            switch (eventType) {
+                case "web_app_set_media_metadata": {
+                    JSONObject data = new JSONObject(eventData);
+                    delegate.onMediaMetadataSet(
+                            data.optString("title", ""),
+                            data.optString("artist", ""),
+                            data.optString("cover_url", null),
+                            (long) (data.optDouble("duration", -1) * 1000)
+                    );
+                    return true;
+                }
+                case "web_app_set_media_playback_state": {
+                    JSONObject data = new JSONObject(eventData);
+                    delegate.onMediaPlaybackStateSet(
+                            (long) (data.optDouble("current_time", -1) * 1000),
+                            (long) (data.optDouble("duration", -1) * 1000),
+                            data.has("is_playing") ? (data.optBoolean("is_playing") ? 1 : 0) : -1,
+                            data.has("is_loading") ? (data.optBoolean("is_loading") ? 1 : 0) : -1,
+                            (float) data.optDouble("playback_rate", -1)
+                    );
+                    return true;
+                }
+                case "web_app_clear_media_metadata":
+                    delegate.onMediaMetadataClear();
+                    return true;
+                case "web_app_set_media_bar_enabled": {
+                    JSONObject data = new JSONObject(eventData);
+                    delegate.onMediaBarEnabled(data.optBoolean("enabled", true));
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+            return true;
+        }
+        return false;
     }
 
 
@@ -1868,6 +1927,52 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                     if (delegate != null) {
                         delegate.onWebAppSetNavigationBarColor(color);
                     }
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+                break;
+            }
+            case "web_app_set_media_metadata": {
+                try {
+                    JSONObject jsonObject = new JSONObject(eventData);
+                    if (delegate != null) {
+                        delegate.onMediaMetadataSet(
+                                jsonObject.optString("title", ""),
+                                jsonObject.optString("artist", ""),
+                                jsonObject.optString("cover_url", null),
+                                (long) (jsonObject.optDouble("duration", -1) * 1000)
+                        );
+                    }
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+                break;
+            }
+            case "web_app_set_media_playback_state": {
+                try {
+                    JSONObject jsonObject = new JSONObject(eventData);
+                    if (delegate != null) {
+                        delegate.onMediaPlaybackStateSet(
+                                (long) (jsonObject.optDouble("current_time", -1) * 1000),
+                                (long) (jsonObject.optDouble("duration", -1) * 1000),
+                                jsonObject.has("is_playing") ? (jsonObject.optBoolean("is_playing") ? 1 : 0) : -1,
+                                jsonObject.has("is_loading") ? (jsonObject.optBoolean("is_loading") ? 1 : 0) : -1,
+                                (float) jsonObject.optDouble("playback_rate", -1)
+                        );
+                    }
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+                break;
+            }
+            case "web_app_clear_media_metadata": {
+                if (delegate != null) delegate.onMediaMetadataClear();
+                break;
+            }
+            case "web_app_set_media_bar_enabled": {
+                try {
+                    JSONObject jsonObject = new JSONObject(eventData);
+                    if (delegate != null) delegate.onMediaBarEnabled(jsonObject.optBoolean("enabled", true));
                 } catch (Exception e) {
                     FileLog.e(e);
                 }
@@ -3793,6 +3898,27 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
         default BotSensors getBotSensors() {
             return null;
         }
+
+        /**
+         * MediaPlayer bridge: Mini App reports what's currently playing (durationMs is -1 if unknown).
+         */
+        default void onMediaMetadataSet(String title, String artist, String coverUrl, long durationMs) {}
+
+        /**
+         * MediaPlayer bridge: Mini App reports playback progress/state. Any field may be -1
+         * (or NaN for playbackRate) to mean "unchanged" -- only send what changed.
+         */
+        default void onMediaPlaybackStateSet(long positionMs, long durationMs, int isPlaying, int isLoading, float playbackRate) {}
+
+        /**
+         * MediaPlayer bridge: playback truly ended with nothing queued next.
+         */
+        default void onMediaMetadataClear() {}
+
+        /**
+         * MediaPlayer bridge: Mini App wants the native transport bar shown/hidden (defaults to shown).
+         */
+        default void onMediaBarEnabled(boolean enabled) {}
     }
 
     public final static class PopupButton {
@@ -5106,6 +5232,9 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
         }
 
         private BotWebViewContainer botWebViewContainer;
+        private Delegate preservedMediaDelegate;
+        private boolean preservedMediaRestrictToOrigin;
+        private String preservedMediaTrustedOrigin;
         private boolean botWebMessageListenerAdded;
         private ScriptHandler botWebMessageShimHandler;
         private WebViewScrollListener webViewScrollListener;
@@ -5116,8 +5245,49 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
             final boolean attachedAgain = this.botWebViewContainer == null && botWebViewContainer != null;
             this.botWebViewContainer = botWebViewContainer;
             this.webViewScrollListener = webViewScrollListener;
+            if (botWebViewContainer != null) {
+                preservedMediaDelegate = null;
+                preservedMediaTrustedOrigin = null;
+                preservedMediaRestrictToOrigin = false;
+            }
             if (attachedAgain) {
                 evaluateJS("window.__tg__postBackgroundChange()");
+            }
+        }
+
+        private void preserveMediaBridge(Delegate delegate, boolean restrictToOrigin, String trustedOrigin) {
+            preservedMediaDelegate = delegate;
+            preservedMediaRestrictToOrigin = restrictToOrigin;
+            preservedMediaTrustedOrigin = trustedOrigin;
+        }
+
+        private void onPreservedMediaMessage(WebMessageCompat message, Uri sourceOrigin) {
+            final Delegate mediaDelegate = preservedMediaDelegate;
+            if (mediaDelegate == null || message == null || message.getType() != WebMessageCompat.TYPE_STRING) {
+                return;
+            }
+            final String source = BotWebViewContainer.getOriginHost(sourceOrigin == null ? null : sourceOrigin.toString());
+            if (preservedMediaRestrictToOrigin
+                    && (TextUtils.isEmpty(preservedMediaTrustedOrigin)
+                    || !TextUtils.equals(preservedMediaTrustedOrigin, source)
+                    || !TextUtils.equals(preservedMediaTrustedOrigin, BotWebViewContainer.getOriginHost(getUrl())))) {
+                d("preserved media message ignored: untrusted origin");
+                return;
+            }
+            try {
+                final String payload = message.getData();
+                if (payload == null || payload.length() > MAX_BOT_WEB_MESSAGE_LENGTH) return;
+                final JSONObject data = new JSONObject(payload);
+                final String eventType = data.getString("eventType");
+                if (eventType.isEmpty() || eventType.length() > 128) return;
+                final String eventData = data.optString("eventData", null);
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (botWebViewContainer == null && preservedMediaDelegate == mediaDelegate) {
+                        dispatchPreservedMediaEvent(mediaDelegate, eventType, eventData);
+                    }
+                });
+            } catch (JSONException e) {
+                FileLog.e(e);
             }
         }
 

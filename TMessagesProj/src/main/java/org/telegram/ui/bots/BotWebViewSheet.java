@@ -25,6 +25,7 @@ import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.text.SpannableStringBuilder;
 import android.text.TextPaint;
 import android.text.TextUtils;
@@ -129,6 +130,18 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
     private int lineColor;
 
     public static HashSet<BotWebViewSheet> activeSheets = new HashSet<>();
+
+    public static boolean reopenSheetForMedia(int account, long botId) {
+        for (BotWebViewSheet sheet : new HashSet<>(activeSheets)) {
+            if (sheet.currentAccount == account && sheet.botId == botId) {
+                if (!sheet.isShowing()) sheet.show();
+                return true;
+            }
+        }
+        LaunchActivity activity = LaunchActivity.instance;
+        BottomSheetTabs tabs = activity == null ? null : activity.getBottomSheetTabs();
+        return tabs != null && tabs.reopenMediaTab(account, botId);
+    }
 
     public void showJustAddedBulletin() {
         TLRPC.User user = MessagesController.getInstance(currentAccount).getUser(botId);
@@ -245,7 +258,58 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
     private Activity parentActivity;
     private BotButtons botButtons;
     private FrameLayout.LayoutParams botButtonsLayoutParams;
+    private BotWebViewMediaBar mediaBar;
+    private BotWebViewMediaSession mediaSession;
     private BotFullscreenButtons fullscreenButtons;
+
+    // Fetches (or creates) the shared, account:botId-keyed session and (re)points its
+    // play/pause/seek callback at this sheet's current webViewContainer -- called whenever
+    // media is reported, and again on restoreState() since a reopened tab is a new sheet
+    // instance with a new webViewContainer.
+    private final BotWebViewMediaSession.Callback mediaSessionCallback = new BotWebViewMediaSession.Callback() {
+        @Override
+        public void onPlayPauseRequested(boolean play) {
+            if (mediaBar != null) mediaBar.applyPlayPauseRequest(play);
+            syncTabMediaTitle();
+            try {
+                webViewContainer.notifyEvent("media_playback_control_requested", new JSONObject().put("is_playing", play));
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+        }
+
+        @Override
+        public void onSeekRequested(long positionMs) {
+            if (mediaBar != null) mediaBar.applySeekRequest(positionMs);
+            syncTabMediaTitle();
+            try {
+                webViewContainer.notifyEvent("media_playback_control_requested", new JSONObject().put("seek_to", positionMs / 1000.0));
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+        }
+    };
+
+    private BotWebViewMediaSession ensureMediaSession() {
+        mediaSession = BotWebViewMediaSession.get(currentAccount, botId);
+        mediaSession.rebindCallback(mediaSessionCallback, true);
+        return mediaSession;
+    }
+
+    private void reattachMediaSession(boolean webViewPreserved) {
+        mediaSession = BotWebViewMediaSession.find(currentAccount, botId);
+        if (mediaSession != null) {
+            mediaSession.rebindCallback(mediaSessionCallback, webViewPreserved);
+            if (mediaBar != null) mediaBar.setControllable(mediaSession.isControllable());
+        }
+    }
+
+    private void updateMediaBarLayout() {
+        if (mediaBar != null) {
+            mediaBar.setTranslationY(-(botButtons != null ? botButtons.getTotalHeight() : 0));
+        }
+        if (swipeContainer != null) swipeContainer.requestLayout();
+    }
 
     private Bulletin downloadBulletin;
     private BotDownloads.DownloadBulletin downloadBulletinLayout;
@@ -302,6 +366,24 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
 
     private BottomSheetTabs.WebTabData lastTab;
 
+    // Keeps the collapsed tab pill's media snapshot live while minimized. BotWebViewContainer's
+    // preserved-media bridge forwards only media events after the full WebApp bridge is detached.
+    private void syncTabMediaTitle() {
+        if (lastTab == null || mediaBar == null) return;
+        lastTab.hasMedia = mediaBar.hasMedia();
+        lastTab.mediaTitle = mediaBar.getTitle();
+        lastTab.mediaArtist = mediaBar.getArtist();
+        lastTab.mediaCoverUrl = mediaBar.getCoverUrl();
+        lastTab.mediaPositionMs = mediaBar.getPositionMs();
+        lastTab.mediaPositionUpdatedAtMs = SystemClock.elapsedRealtime();
+        lastTab.mediaDurationMs = mediaBar.getDurationMs();
+        lastTab.mediaPlaybackRate = mediaBar.getPlaybackRate();
+        lastTab.mediaPlaying = mediaBar.isPlaying();
+        lastTab.mediaLoading = mediaBar.isLoading();
+        lastTab.mediaBarEnabled = mediaBar.isMediaBarEnabled();
+        if (bottomTabs != null) bottomTabs.invalidate();
+    }
+
     public BottomSheetTabs.WebTabData saveState() {
         BottomSheetTabs.WebTabData tab = new BottomSheetTabs.WebTabData();
         tab.actionBarColor = actionBarColor;
@@ -327,18 +409,31 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
         tab.allowSwipes = swipeContainer == null || swipeContainer.isAllowedSwipes();
         tab.buttons = botButtons.state;
         tab.navigationBarColor = navBarColor;
+        if (mediaBar != null) {
+            tab.hasMedia = mediaBar.hasMedia();
+            tab.mediaTitle = mediaBar.getTitle();
+            tab.mediaArtist = mediaBar.getArtist();
+            tab.mediaCoverUrl = mediaBar.getCoverUrl();
+            tab.mediaPositionMs = mediaBar.getPositionMs();
+            tab.mediaPositionUpdatedAtMs = SystemClock.elapsedRealtime();
+            tab.mediaDurationMs = mediaBar.getDurationMs();
+            tab.mediaPlaybackRate = mediaBar.getPlaybackRate();
+            tab.mediaPlaying = mediaBar.isPlaying();
+            tab.mediaLoading = mediaBar.isLoading();
+            tab.mediaBarEnabled = mediaBar.isMediaBarEnabled();
+        }
         if (sensors != null) {
             sensors.pause();
         }
         tab.sensors = sensors;
         BotWebViewContainer.MyWebView webView = webViewContainer == null ? null : webViewContainer.getWebView();
         if (webView != null) {
-            webViewContainer.preserveWebView();
+            webViewContainer.preserveWebView(tab.hasMedia);
             tab.webView = webView;
             tab.proxy = webViewContainer == null ? null : webViewContainer.getBotProxy();
             tab.viewWidth = webView.getWidth();
             tab.viewHeight = webView.getHeight();
-            webView.onPause();
+            if (!tab.hasMedia) webView.onPause();
 //            webView.pauseTimers();
         }
         if (tab.error = errorShown) {
@@ -386,6 +481,16 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
 //            setMainButton(tab.main);
             botButtons.setState(tab.buttons, false);
         }
+        // A reopened tab gets a brand-new BotWebViewMediaBar (hasMedia=false by default).
+        // The Mini App's JS already sent its one-time web_app_set_media_metadata call long
+        // before this reopen, so it may never resend it -- only web_app_set_media_playback_state
+        // keeps arriving, which alone can't set hasMedia. Restore from the snapshot so the
+        // bar (and the tab pill, if minimized again) don't silently lose the cover/time.
+        if (mediaBar != null && tab.hasMedia) {
+            mediaBar.setMetadata(tab.mediaTitle, tab.mediaArtist, tab.mediaCoverUrl, tab.mediaDurationMs);
+            mediaBar.setPlaybackState(tab.getMediaPositionMs(), tab.mediaDurationMs, tab.mediaPlaying ? 1 : 0, tab.mediaLoading ? 1 : 0, tab.mediaPlaybackRate);
+            mediaBar.setMediaBarEnabled(tab.mediaBarEnabled);
+        }
         setFullscreen(tab.fullscreen, false, tab.fullscreenBlur);
         currentAccount = tab.props != null ? tab.props.currentAccount : UserConfig.selectedAccount;
         if (tab.webView != null) {
@@ -419,6 +524,9 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
             tab.props.responseTime = 0;
         }
         requestWebView(fragment, tab.props);
+        // The account:botId-keyed session (if any) survived the minimize untouched -- just
+        // repoint its callback at this new sheet instance's webViewContainer.
+        if (tab.hasMedia) reattachMediaSession(tab.webView != null);
         hasSettings = tab.settings;
 
         if (tab.error) {
@@ -474,6 +582,9 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
 //                    if (fullscreen) {
 //                        height -= insets.bottom;
 //                    }
+                }
+                if (mediaBar != null && mediaBar.getVisibility() == View.VISIBLE) {
+                    height -= dp(BotWebViewMediaBar.HEIGHT_DP);
                 }
                 height += dp(24);
                 super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY));
@@ -552,6 +663,46 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
                 if (swipeContainer != null) {
                     swipeContainer.setAllowSwipes(allowSwiping);
                 }
+            }
+
+            @Override
+            public void onMediaMetadataSet(String title, String artist, String coverUrl, long durationMs) {
+                if (mediaBar != null) {
+                    mediaBar.setMetadata(title, artist, coverUrl, durationMs);
+                    updateMediaBarLayout();
+                }
+                ensureMediaSession().setMetadata(title, artist, coverUrl, durationMs);
+                if (mediaBar != null) mediaBar.setControllable(true);
+                syncTabMediaTitle();
+            }
+
+            @Override
+            public void onMediaPlaybackStateSet(long positionMs, long durationMs, int isPlaying, int isLoading, float playbackRate) {
+                if (mediaBar != null) mediaBar.setPlaybackState(positionMs, durationMs, isPlaying, isLoading, playbackRate);
+                if (mediaSession != null) mediaSession.setPlaybackState(positionMs, durationMs, isPlaying, isLoading, playbackRate);
+                if (mediaBar != null) mediaBar.setControllable(true);
+                syncTabMediaTitle();
+            }
+
+            @Override
+            public void onMediaMetadataClear() {
+                if (mediaBar != null) {
+                    mediaBar.clearMetadata();
+                    updateMediaBarLayout();
+                }
+                if (mediaSession != null) mediaSession.clear();
+                syncTabMediaTitle();
+            }
+
+            @Override
+            public void onMediaBarEnabled(boolean enabled) {
+                if (mediaBar != null) {
+                    mediaBar.setMediaBarEnabled(enabled);
+                    updateMediaBarLayout();
+                }
+                if (mediaSession != null) mediaSession.setMediaBarEnabled(enabled);
+                if (mediaBar != null) mediaBar.setControllable(true);
+                syncTabMediaTitle();
             }
 
             @Override
@@ -903,9 +1054,29 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
             }
         });
         botButtons.setOnResizeListener(() -> {
-            swipeContainer.requestLayout();
+            updateMediaBarLayout();
         });
         windowView.addView(botButtons, botButtonsLayoutParams = LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+
+        mediaBar = new BotWebViewMediaBar(getContext());
+        mediaBar.setCallback(new BotWebViewMediaBar.Callback() {
+            @Override
+            public void onPlayPauseRequested(boolean play) {
+                if (mediaSession != null) mediaSession.requestPlayPause(play);
+            }
+
+            @Override
+            public void onSeekRequested(long positionMs) {
+                if (mediaSession != null) mediaSession.requestSeekAbsolute(positionMs);
+            }
+
+            @Override
+            public void onStateChanged() {
+                syncTabMediaTitle();
+            }
+        });
+        windowView.addView(mediaBar, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, BotWebViewMediaBar.HEIGHT_DP, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+        updateMediaBarLayout();
 
         fullscreenButtons = new BotFullscreenButtons(getContext());
         fullscreenButtons.setAlpha(0f);
@@ -2133,6 +2304,13 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
             }
             LaunchActivity.instance.getBottomSheetTabsOverlay().dismissSheet(this);
         } else {
+            // Full close (not minimizing to a tab) -- the notification/MediaSessionCompat
+            // should go away with it. A minimize deliberately does NOT reach this branch, so
+            // the notification survives while the Mini App keeps playing in the background.
+            if (mediaSession != null) {
+                mediaSession.release();
+                mediaSession = null;
+            }
             if (botButtons != null) {
                 botButtons.animate().translationY(botButtons.getTotalHeight()).alpha(0).setDuration(160).setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT).start();
             }
@@ -2735,12 +2913,7 @@ public class BotWebViewSheet extends Dialog implements NotificationCenter.Notifi
         if (errorContainer == null) {
             swipeContainer.addView(errorContainer = new ArticleViewer.ErrorContainer(getContext()), LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
             errorContainer.setTranslationY(-1);
-            errorContainer.buttonView.setOnClickListener(v -> {
-                BotWebViewContainer.MyWebView webView = webViewContainer.getWebView();
-                if (webView != null) {
-                    webView.reload();
-                }
-            });
+            errorContainer.buttonView.setOnClickListener(v -> webViewContainer.reload());
             errorContainer.setBackgroundColor(backgroundPaint.getColor());
             AndroidUtilities.updateViewVisibilityAnimated(errorContainer, errorShown, 1f, false);
         }
