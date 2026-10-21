@@ -1456,7 +1456,17 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
             WebViewCompat.addWebMessageListener(bridgeWebView,
                 BOT_WEB_MESSAGE_BRIDGE,
                 allowedOrigins,
-                    (view, message, sourceOrigin, ignoredIsMainFrame, replyProxy) -> {
+                    (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                        if (!isMainFrame) {
+                            d("onBotWebMessage ignored: subframe");
+                            return;
+                        }
+                        final String source = getOriginHost(sourceOrigin == null ? null : sourceOrigin.toString());
+                        final String current = getOriginHost(bridgeWebView.getUrl());
+                        if (TextUtils.isEmpty(source) || !TextUtils.equals(source, current)) {
+                            d("onBotWebMessage ignored: origin does not match current document");
+                            return;
+                        }
                         final BotWebViewContainer container = bridgeWebView.botWebViewContainer;
                         if (view == bridgeWebView && container != null) {
                             container.onBotWebMessage(view, message, sourceOrigin);
@@ -1526,26 +1536,28 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
      */
     private static boolean dispatchPreservedMediaEvent(Delegate delegate, String eventType, String eventData) {
         if (delegate == null) return false;
+        if (eventData != null && eventData.length() > 16 * 1024) return true;
         try {
             switch (eventType) {
                 case "web_app_set_media_metadata": {
                     JSONObject data = new JSONObject(eventData);
+                    String coverUrl = sanitizeMediaCoverUrl(data.optString("cover_url", null));
                     delegate.onMediaMetadataSet(
-                            data.optString("title", ""),
-                            data.optString("artist", ""),
-                            data.optString("cover_url", null),
-                            (long) (data.optDouble("duration", -1) * 1000)
+                            sanitizeMediaText(data.optString("title", ""), 256),
+                            sanitizeMediaText(data.optString("artist", ""), 256),
+                            coverUrl,
+                            parseMediaTimeMs(data, "duration")
                     );
                     return true;
                 }
                 case "web_app_set_media_playback_state": {
                     JSONObject data = new JSONObject(eventData);
                     delegate.onMediaPlaybackStateSet(
-                            (long) (data.optDouble("current_time", -1) * 1000),
-                            (long) (data.optDouble("duration", -1) * 1000),
+                            parseMediaTimeMs(data, "current_time"),
+                            parseMediaTimeMs(data, "duration"),
                             data.has("is_playing") ? (data.optBoolean("is_playing") ? 1 : 0) : -1,
                             data.has("is_loading") ? (data.optBoolean("is_loading") ? 1 : 0) : -1,
-                            (float) data.optDouble("playback_rate", -1)
+                            parseMediaPlaybackRate(data)
                     );
                     return true;
                 }
@@ -1563,6 +1575,38 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
             return true;
         }
         return false;
+    }
+
+    private static final double MAX_MEDIA_TIME_SECONDS = 5 * 60 * 60;
+
+    private static String sanitizeMediaText(String value, int maxLength) {
+        if (value == null) return "";
+        value = value.trim();
+        return value.length() <= maxLength ? value : value.substring(0, maxLength);
+    }
+
+    private static String sanitizeMediaCoverUrl(String value) {
+        if (TextUtils.isEmpty(value) || value.length() > 2048) return null;
+        try {
+            Uri uri = Uri.parse(value);
+            String scheme = uri.getScheme();
+            return ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) && !TextUtils.isEmpty(uri.getHost()) ? value : null;
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    private static long parseMediaTimeMs(JSONObject data, String key) {
+        if (!data.has(key)) return -1;
+        double value = data.optDouble(key, -1);
+        if (Double.isNaN(value) || Double.isInfinite(value) || value < 0 || value > MAX_MEDIA_TIME_SECONDS) return -1;
+        return (long) (value * 1000);
+    }
+
+    private static float parseMediaPlaybackRate(JSONObject data) {
+        if (!data.has("playback_rate")) return -1;
+        double value = data.optDouble("playback_rate", -1);
+        return !Double.isNaN(value) && !Double.isInfinite(value) && value >= 0.1 && value <= 16 ? (float) value : -1;
     }
 
 
@@ -1933,49 +1977,19 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                 break;
             }
             case "web_app_set_media_metadata": {
-                try {
-                    JSONObject jsonObject = new JSONObject(eventData);
-                    if (delegate != null) {
-                        delegate.onMediaMetadataSet(
-                                jsonObject.optString("title", ""),
-                                jsonObject.optString("artist", ""),
-                                jsonObject.optString("cover_url", null),
-                                (long) (jsonObject.optDouble("duration", -1) * 1000)
-                        );
-                    }
-                } catch (Exception e) {
-                    FileLog.e(e);
-                }
+                dispatchPreservedMediaEvent(delegate, eventType, eventData);
                 break;
             }
             case "web_app_set_media_playback_state": {
-                try {
-                    JSONObject jsonObject = new JSONObject(eventData);
-                    if (delegate != null) {
-                        delegate.onMediaPlaybackStateSet(
-                                (long) (jsonObject.optDouble("current_time", -1) * 1000),
-                                (long) (jsonObject.optDouble("duration", -1) * 1000),
-                                jsonObject.has("is_playing") ? (jsonObject.optBoolean("is_playing") ? 1 : 0) : -1,
-                                jsonObject.has("is_loading") ? (jsonObject.optBoolean("is_loading") ? 1 : 0) : -1,
-                                (float) jsonObject.optDouble("playback_rate", -1)
-                        );
-                    }
-                } catch (Exception e) {
-                    FileLog.e(e);
-                }
+                dispatchPreservedMediaEvent(delegate, eventType, eventData);
                 break;
             }
             case "web_app_clear_media_metadata": {
-                if (delegate != null) delegate.onMediaMetadataClear();
+                dispatchPreservedMediaEvent(delegate, eventType, eventData);
                 break;
             }
             case "web_app_set_media_bar_enabled": {
-                try {
-                    JSONObject jsonObject = new JSONObject(eventData);
-                    if (delegate != null) delegate.onMediaBarEnabled(jsonObject.optBoolean("enabled", true));
-                } catch (Exception e) {
-                    FileLog.e(e);
-                }
+                dispatchPreservedMediaEvent(delegate, eventType, eventData);
                 break;
             }
             case "web_app_data_send": {
@@ -4352,6 +4366,12 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
 
                 @Override
                 public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                    if (botWebViewContainer != null && botWebViewContainer.delegate != null) {
+                        botWebViewContainer.delegate.onMediaMetadataClear();
+                    } else if (preservedMediaDelegate != null) {
+                        preservedMediaDelegate.onMediaMetadataClear();
+                        preservedMediaDelegate = null;
+                    }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         d("onRenderProcessGone priority=" + (detail == null ? null : detail.rendererPriorityAtExit()) + " didCrash=" + (detail == null ? null : detail.didCrash()));
                     } else {
@@ -4794,6 +4814,9 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                         newWebView.setWebViewClient(new WebViewClient() {
                             @Override
                             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                                if (botWebViewContainer != null && botWebViewContainer.delegate != null) {
+                                    botWebViewContainer.delegate.onMediaMetadataClear();
+                                }
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                     d("newWebView.onRenderProcessGone priority=" + (detail == null ? null : detail.rendererPriorityAtExit()) + " didCrash=" + (detail == null ? null : detail.didCrash()));
                                 } else {

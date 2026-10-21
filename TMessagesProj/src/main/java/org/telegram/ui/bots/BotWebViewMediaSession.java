@@ -100,6 +100,14 @@ public class BotWebViewMediaSession {
     private boolean seekPending;
     private long pendingSeekMs;
     private long pendingSeekStartedAt;
+    private boolean metadataPublished;
+    private String publishedMetadataTitle;
+    private String publishedMetadataArtist;
+    private long publishedMetadataDuration;
+    private Bitmap publishedMetadataCover;
+    private int pausedCleanupGeneration;
+
+    private static final long PAUSED_SESSION_TIMEOUT_MS = 30 * 60 * 1000L;
 
     private BotWebViewMediaSession(int account, long botId, String key) {
         this.account = account;
@@ -143,17 +151,12 @@ public class BotWebViewMediaSession {
 
     public void setMetadata(String title, String artist, String coverUrl, long durationMs) {
         onBridgeActivity();
-        this.title = title == null ? "" : title;
-        this.artist = artist == null ? "" : artist;
+        this.title = trimToLength(title, 256);
+        this.artist = trimToLength(artist, 256);
+        coverUrl = validCoverUrl(coverUrl);
         if (durationMs >= 0) this.durationMs = durationMs;
         hasMedia = true;
-        final boolean becameActive = activeSession != this;
-        if (activeSession != null && activeSession != this) {
-            activeSession.mediaSession.setActive(false);
-        }
-        activeSession = this;
-        mediaSession.setActive(true);
-        if (becameActive) notifiedTitle = null;
+        if (activeSession == null || activeSession == this) activate(false);
         if (!TextUtils.equals(this.coverUrl, coverUrl)) {
             this.coverUrl = coverUrl;
             coverBitmap = null;
@@ -177,7 +180,15 @@ public class BotWebViewMediaSession {
             }
         }
         if (durationMs >= 0) this.durationMs = durationMs;
-        if (isPlaying >= 0) this.playing = isPlaying == 1;
+        if (isPlaying >= 0) {
+            this.playing = isPlaying == 1;
+            if (this.playing) {
+                activate(true);
+                pausedCleanupGeneration++;
+            } else {
+                schedulePausedCleanup();
+            }
+        }
         if (isLoading >= 0) {
             this.loading = isLoading == 1;
             if (!this.loading) loadingRequestId++;
@@ -199,6 +210,7 @@ public class BotWebViewMediaSession {
     // host sheet merely minimizes (see BotWebViewSheet/BotWebViewAttachedSheet: they deliberately
     // don't call this on minimize so the notification survives).
     public void clear() {
+        pausedCleanupGeneration++;
         hasMedia = false;
         playing = false;
         loading = false;
@@ -215,6 +227,11 @@ public class BotWebViewMediaSession {
         mediaSession.setActive(false);
         mediaSession.setPlaybackState(new PlaybackStateCompat.Builder().setState(PlaybackStateCompat.STATE_NONE, 0, 0).build());
         mediaSession.setMetadata(null);
+        metadataPublished = false;
+        publishedMetadataTitle = null;
+        publishedMetadataArtist = null;
+        publishedMetadataDuration = 0;
+        publishedMetadataCover = null;
         notifiedTitle = null;
         notifiedArtist = null;
         notifiedCover = null;
@@ -239,10 +256,13 @@ public class BotWebViewMediaSession {
         if (!controllable) return;
         playing = play;
         if (play) {
+            activate(true);
+            pausedCleanupGeneration++;
             beginLoading();
         } else {
             loading = false;
             loadingRequestId++;
+            schedulePausedCleanup();
         }
         publish();
         if (callback != null) callback.onPlayPauseRequested(play);
@@ -277,6 +297,57 @@ public class BotWebViewMediaSession {
         }, LOADING_TIMEOUT_MS);
     }
 
+    private void activate(boolean pausePrevious) {
+        if (activeSession == this) {
+            mediaSession.setActive(true);
+            return;
+        }
+        BotWebViewMediaSession previous = activeSession;
+        if (pausePrevious && previous != null && previous.playing) {
+            previous.requestPlayPause(false);
+        }
+        if (previous != null) previous.mediaSession.setActive(false);
+        activeSession = this;
+        mediaSession.setActive(true);
+        notifiedTitle = null;
+    }
+
+    private void schedulePausedCleanup() {
+        final int generation = ++pausedCleanupGeneration;
+        AndroidUtilities.runOnUIThread(() -> {
+            if (generation == pausedCleanupGeneration && hasMedia && !playing && !loading) {
+                suspendPausedNotification();
+            }
+        }, PAUSED_SESSION_TIMEOUT_MS);
+    }
+
+    private void suspendPausedNotification() {
+        if (activeSession != this) return;
+        activeSession = null;
+        context.stopService(new Intent(context, BotWebViewMediaService.class));
+        mediaSession.setActive(false);
+        notifiedTitle = null;
+        notifiedArtist = null;
+        notifiedCover = null;
+    }
+
+    private static String trimToLength(String value, int maxLength) {
+        if (value == null) return "";
+        value = value.trim();
+        return value.length() <= maxLength ? value : value.substring(0, maxLength);
+    }
+
+    private static String validCoverUrl(String value) {
+        if (TextUtils.isEmpty(value) || value.length() > 2048) return null;
+        try {
+            android.net.Uri uri = android.net.Uri.parse(value);
+            String scheme = uri.getScheme();
+            return ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) && !TextUtils.isEmpty(uri.getHost()) ? value : null;
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
     // Last notification content actually posted, so publish() (called roughly once a second
     // while media plays, per the SDK's throttled position reporting) doesn't repost the
     // Notification -- a RemoteViews rebuild plus a binder IPC to system_server -- on every tick.
@@ -288,12 +359,25 @@ public class BotWebViewMediaSession {
 
     private void publish() {
         if (!hasMedia) return;
-        MediaMetadataCompat.Builder metadata = new MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
-        if (coverBitmap != null && !coverBitmap.isRecycled()) metadata.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, coverBitmap);
-        mediaSession.setMetadata(metadata.build());
+        // Metadata (especially album-art bitmap parceling) is much more expensive than a
+        // PlaybackState update. Position ticks must not resend it when the track is unchanged.
+        if (!metadataPublished || !TextUtils.equals(title, publishedMetadataTitle)
+                || !TextUtils.equals(artist, publishedMetadataArtist)
+                || durationMs != publishedMetadataDuration || coverBitmap != publishedMetadataCover) {
+            MediaMetadataCompat.Builder metadata = new MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+            if (coverBitmap != null && !coverBitmap.isRecycled()) {
+                metadata.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, coverBitmap);
+            }
+            mediaSession.setMetadata(metadata.build());
+            metadataPublished = true;
+            publishedMetadataTitle = title;
+            publishedMetadataArtist = artist;
+            publishedMetadataDuration = durationMs;
+            publishedMetadataCover = coverBitmap;
+        }
         final boolean controlsLoading = loading || !controllable;
         long actions = PlaybackStateCompat.ACTION_SEEK_TO;
         if (!controlsLoading) {

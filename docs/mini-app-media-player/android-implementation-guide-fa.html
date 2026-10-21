@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>راهنمای پیاده‌سازی اندروید پخش‌کنندهٔ Mini App تلگرام</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f6f8fb; --card:#fff; --text:#172033; --muted:#5d687a; --line:#dbe1ea; --accent:#2878d0; --code:#eef3f8; --good:#147a48; --warn:#9a5b00; }
+    @media (prefers-color-scheme:dark){:root{--bg:#11151c;--card:#191f29;--text:#e8edf5;--muted:#a8b2c2;--line:#303949;--accent:#65aaf2;--code:#222a36;--good:#62ce94;--warn:#efb35d}}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.9 Tahoma,system-ui,-apple-system,"Segoe UI",sans-serif} main{max-width:1040px;margin:auto;padding:40px 22px 80px} h1{font-size:2.05rem;line-height:1.45;margin:.2em 0} h2{margin-top:2.2em;border-bottom:1px solid var(--line);padding-bottom:.35em} h3{margin-top:1.6em} p,li{max-width:88ch}.lead{font-size:1.08rem;color:var(--muted)} .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 22px;margin:18px 0}.good{border-right:4px solid var(--good)}.warn{border-right:4px solid var(--warn)} code{direction:ltr;unicode-bidi:embed;background:var(--code);padding:.12em .35em;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace} pre{direction:ltr;text-align:left;background:var(--code);padding:16px;border-radius:10px;overflow:auto;line-height:1.5} table{border-collapse:collapse;width:100%;background:var(--card)} th,td{border:1px solid var(--line);padding:10px 12px;text-align:right;vertical-align:top} th{background:var(--code)} nav a{color:var(--accent);margin-left:16px} a{color:var(--accent)} .flow{direction:ltr;text-align:left;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.small{font-size:.9rem;color:var(--muted)}
+  </style>
+</head>
+<body><main>
+  <header>
+    <p class="small">مستندات سورس اندروید · به‌روزرسانی ۲۰۲۶-۱۰-۲۱</p>
+    <h1>راهنمای پیاده‌سازی اندروید پخش‌کنندهٔ Mini App</h1>
+    <p class="lead">معماری و قواعد فنی اتصال رسانهٔ در حال پخش داخل WebView مینی‌اپ به MediaSession اندروید، نوتیفیکیشن foreground، نوار پخش داخل برنامه و Tab کوچک‌شدهٔ Mini App.</p>
+    <nav><a href="#architecture">معماری</a><a href="#bridge">Bridge</a><a href="#lifecycle">چرخهٔ حیات</a><a href="#security">امنیت</a><a href="#battery">باتری</a><a href="#testing">تست</a></nav>
+  </header>
+
+  <section><h2>۱. هدف‌ها و مرزهای طراحی</h2>
+    <ul>
+      <li>فراهم‌کردن Play/Pause و Seek خارج از WebView از طریق کنترل‌های رسانه‌ای اندروید.</li>
+      <li>مالک پخش واقعی همچنان صفحهٔ وب است. کد Native فقط وضعیت را منعکس می‌کند و درخواست کنترل می‌فرستد؛ فایل صوتی Mini App را decode یا پخش نمی‌کند.</li>
+      <li>ادامهٔ پخش و کنترل هنگام Minimize شدن Mini App یا رفتن تلگرام به پس‌زمینه.</li>
+      <li>جلوگیری از polling و به‌روزرسانی تکراری نوتیفیکیشن یا artwork.</li>
+      <li>پس از Minimize، Bridge عمومی WebApp قطع می‌ماند و فقط پیام‌های مجاز رسانه عبور می‌کنند.</li>
+    </ul>
+    <div class="card warn"><strong>فقط یک Player فعال:</strong> اندروید فقط یک MediaSession فعال برای Mini Appها ارائه می‌کند. با شروع پخش در Mini App دیگر، برای session قبلی درخواست Pause ارسال شده و وضعیت فعال MediaSession از آن گرفته می‌شود.</div>
+  </section>
+
+  <section id="architecture"><h2>۲. معماری</h2>
+    <div class="flow card">Mini App audio/video element
+  ⇅ Telegram.WebApp.MediaPlayer SDK
+WebView message bridge
+  ⇅ BotWebViewContainer.Delegate
+BotWebViewMediaBar + minimized WebTabData
+  ⇅ BotWebViewMediaSession
+Android MediaSessionCompat + BotWebViewMediaService notification
+  ⇅ BotWebViewMediaReceiver / MediaSession callback
+Control request returned to JavaScript</div>
+    <table><thead><tr><th>جزء</th><th>وظیفه</th></tr></thead><tbody>
+      <tr><td><code>BotWebViewContainer</code></td><td>دریافت و اعتبارسنجی eventهای رسانه، حفظ Bridge محدود رسانه هنگام Minimize و ارسال درخواست کنترل Native به JavaScript.</td></tr>
+      <tr><td><code>BotWebViewSheet</code> و <code>BotWebViewAttachedSheet</code></td><td>نگهداری delegate، هماهنگ‌کردن Media Bar و snapshot تب، اتصال callbackها و تفکیک Minimize از Close کامل.</td></tr>
+      <tr><td><code>BotWebViewMediaBar</code></td><td>نمایش عنوان، کاور، progress، loading، Play/Pause و Seek داخل اپ.</td></tr>
+      <tr><td><code>BottomSheetTabs.WebTabData</code></td><td>نگهداری snapshot فشردهٔ رسانه در حالت Minimize و تخمین position با ساعت monotonic و playback rate.</td></tr>
+      <tr><td><code>BotWebViewMediaSession</code></td><td>منبع اصلی وضعیت MediaSession، محتوای نوتیفیکیشن، انتخاب session فعال، محافظ Seek و timeout حالت Pause.</td></tr>
+      <tr><td><code>BotWebViewMediaService</code></td><td>میزبانی نوتیفیکیشن به‌صورت foreground service با نوع media playback.</td></tr>
+      <tr><td><code>BotWebViewMediaReceiver</code></td><td>دریافت broadcast صریح Play/Pause نوتیفیکیشن.</td></tr>
+      <tr><td><code>LaunchActivity</code></td><td>بازکردن Mini App کوچک‌شدهٔ درست هنگام لمس نوتیفیکیشن.</td></tr>
+    </tbody></table>
+  </section>
+
+  <section id="bridge"><h2>۳. قرارداد Bridge و جریان داده</h2>
+    <h3>Eventهای Web به Android</h3>
+    <table><thead><tr><th>Event</th><th>کاربرد</th><th>دفعات مناسب</th></tr></thead><tbody>
+      <tr><td><code>web_app_set_media_metadata</code></td><td>عنوان، خواننده، URL کاور و مدت.</td><td>یک‌بار برای هر Track یا هنگام تغییر واقعی metadata.</td></tr>
+      <tr><td><code>web_app_set_media_playback_state</code></td><td>زمان، مدت، playing، loading و سرعت پخش.</td><td>هنگام تغییر وضعیت؛ tick زمان فقط وقتی صفحه دیده می‌شود.</td></tr>
+      <tr><td><code>web_app_clear_media_metadata</code></td><td>پایان session وقتی چیزی در صف باقی نمانده است.</td><td>فقط پایان واقعی یا teardown، نه بین آهنگ‌های playlist.</td></tr>
+      <tr><td><code>web_app_set_media_bar_enabled</code></td><td>نمایش یا عدم نمایش نوار Native داخل Sheet.</td><td>هنگام تغییر تنظیم.</td></tr>
+    </tbody></table>
+    <h3>Event اندروید به Web</h3>
+    <p><code>media_playback_control_requested</code> شامل <code>{is_playing}</code> یا <code>{seek_to}</code> است. JavaScript درخواست را روی media element واقعی اعمال می‌کند و بعد وضعیت تثبیت‌شده را به Native گزارش می‌دهد.</p>
+    <div class="card good"><strong>قاعدهٔ Seek:</strong> بلافاصله پس از تعیین target جدید، مقدار <code>audio.currentTime</code> دوباره گزارش نشود. Native وارد loading می‌شود و منتظر <code>seeked</code> یا <code>playing</code> می‌ماند؛ در نتیجه position قدیمی scrubber را به عقب برنمی‌گرداند.</div>
+  </section>
+
+  <section id="lifecycle"><h2>۴. چرخهٔ حیات</h2>
+    <h3>Sheet قابل‌مشاهده</h3><p>Bridge کامل WebApp متصل است. eventهای رسانه، Media Bar، MediaSession، نوتیفیکیشن و snapshot احتمالی Tab را به‌روز می‌کنند.</p>
+    <h3>Minimize به Tab</h3><p>WebView فقط در صورت وجود رسانهٔ فعال حفظ می‌شود. Bridge عمومی قطع و <code>visibility_changed(false)</code> ارسال می‌شود. delegate محدود فقط چهار event مجاز رسانه را دریافت می‌کند و صوت همچنان متعلق به WebView است.</p>
+    <h3>بازگشت به Sheet</h3><p>WebView و callback دوباره متصل، <code>visibility_changed(true)</code> ارسال و یک snapshot کامل برای همگام‌سازی Web و Native فرستاده می‌شود.</p>
+    <h3>بستن کامل</h3><p>MediaSession آزاد، سرویس و نوتیفیکیشن متوقف، بارگیری کاور لغو و WebView نابود می‌شود.</p>
+    <h3>Crash شدن renderer</h3><p><code>onRenderProcessGone</code> فوراً metadata را پاک می‌کند تا کنترل قدیمی یا نوتیفیکیشن یتیم باقی نماند.</p>
+    <h3>Pause طولانی</h3><p>بعد از ۳۰ دقیقه Pause پیوسته، foreground service و نوتیفیکیشن suspend می‌شوند. metadata در حافظه حفظ می‌شود تا Play بعدی بدون ارسال دوبارهٔ اطلاعات Track، session را فعال کند.</p>
+  </section>
+
+  <section id="security"><h2>۵. امنیت و اعتبارسنجی ورودی</h2>
+    <ul>
+      <li>پیام WebMessage فقط از main frame پذیرفته می‌شود.</li>
+      <li>origin فرستنده باید دقیقاً با origin سند top-level فعلی یکسان باشد.</li>
+      <li>بعد از Minimize فقط نام eventهای رسانه در allowlist هستند و سایر APIهای WebApp قطع می‌مانند.</li>
+      <li>حداکثر اندازهٔ payload رسانه ۱۶ KiB است.</li>
+      <li>عنوان و خواننده trim شده و حداکثر ۲۵۶ کاراکتر هستند.</li>
+      <li>URL کاور حداکثر ۲۰۴۸ کاراکتر، دارای host و فقط با scheme نوع HTTP(S) است.</li>
+      <li>position و duration باید finite، نامنفی و حداکثر ۵ ساعت باشند.</li>
+      <li>playback rate باید finite و بین ۰٫۱ تا ۱۶ باشد.</li>
+      <li>اعتبارسنجی در Native هم انجام می‌شود؛ چون محتوای وب می‌تواند helperهای SDK را دور بزند.</li>
+      <li>PendingIntentها immutable هستند، service و receiver export نشده‌اند و Intent کنترل، component صریح و کلید session دارد.</li>
+    </ul>
+  </section>
+
+  <section id="battery"><h2>۶. قواعد مصرف باتری و کارایی</h2>
+    <ul>
+      <li>عملیات پس‌زمینه event-driven است. در حالت Minimize یا وقتی <code>document.hidden</code> است، position هر ثانیه ارسال نشود.</li>
+      <li>Native زمان را با آخرین position، مقدار <code>SystemClock.elapsedRealtime()</code> و playback rate محاسبه می‌کند.</li>
+      <li>SDK پیام‌های position-only اشتباهی در پس‌زمینه را تجمیع و پس از فعال‌شدن فقط یک snapshot ارسال می‌کند.</li>
+      <li>MediaSession position و speed را دریافت می‌کند تا خود سیستم progress را بدون repost نوتیفیکیشن حرکت دهد.</li>
+      <li>نوتیفیکیشن فقط با تغییر title، artist، artwork، playing، loading یا controllability دوباره ساخته می‌شود.</li>
+      <li>metadata و bitmap کاور فقط هنگام تغییر واقعی به MediaSession ارسال می‌شوند.</li>
+      <li>redraw زمان Tab و animation مربوط به loading فقط وقتی parent window متصل و قابل‌مشاهده است اجرا می‌شوند.</li>
+      <li>کاور از ImageLoader و cache استفاده می‌کند و با اندازهٔ نمایشی محدود درخواست می‌شود. URL کاور نباید با هر progress تغییر کند.</li>
+      <li>این قابلیت WakeLock اضافه نمی‌گیرد.</li>
+    </ul>
+  </section>
+
+  <section><h2>۷. اتصال به امکانات اندروید</h2>
+    <ul>
+      <li>Manifest مجوز <code>FOREGROUND_SERVICE_MEDIA_PLAYBACK</code> را دارد و <code>BotWebViewMediaService</code> با <code>foregroundServiceType="mediaPlayback"</code> ثبت شده است.</li>
+      <li>سرویس از notification channel موجود تلگرام و الگوی <code>startForegroundService</code>/<code>startForeground</code> استفاده می‌کند.</li>
+      <li><code>PlaybackStateCompat</code> هنگام قابل‌کنترل‌بودن، actionهای Play، Pause، Play/Pause و Seek را منتشر می‌کند. حالت loading یا قطع‌شدن Bridge موقتاً action ناامن را غیرفعال می‌کند.</li>
+      <li>timeout مربوط به loading مانع ماندن دائمی کنترل‌ها در spinner می‌شود اگر Mini App پاسخ ندهد.</li>
+      <li>محافظ pending-seek پیام position قدیمی را نادیده می‌گیرد تا target تأیید شود یا timeout ایمنی پایان یابد.</li>
+    </ul>
+  </section>
+
+  <section id="testing"><h2>۸. ماتریس تست ضروری</h2>
+    <table><thead><tr><th>سناریو</th><th>نتیجهٔ مورد انتظار</th></tr></thead><tbody>
+      <tr><td>Minimize هنگام پخش</td><td>صوت ادامه دارد، Tab و نوتیفیکیشن زمان در حال حرکت نشان می‌دهند و Bridge پیام ثانیه‌ای ندارد.</td></tr>
+      <tr><td>Play/Pause نوتیفیکیشن</td><td>media element وب تغییر می‌کند و Native تأیید وضعیت را دریافت می‌کند.</td></tr>
+      <tr><td>Seek به بخش buffered یا unbuffered</td><td>target فوراً نمایش داده می‌شود، loading موقت است و snap-back رخ نمی‌دهد.</td></tr>
+      <tr><td>تغییر Track در حالت Minimize</td><td>metadata و کاور یک‌بار تغییر می‌کنند و session قابل‌کنترل می‌ماند.</td></tr>
+      <tr><td>شروع پخش Mini App دوم</td><td>Mini App قبلی Pause و session جدید تنها session فعال سیستم می‌شود.</td></tr>
+      <tr><td>Pause به مدت ۳۰ دقیقه</td><td>foreground service و نوتیفیکیشن متوقف و با Play بعدی دوباره ساخته می‌شوند.</td></tr>
+      <tr><td>کشته‌شدن renderer یا process</td><td>MediaSession فعال یا نوتیفیکیشن یتیم باقی نمی‌ماند.</td></tr>
+      <tr><td>خاموش‌شدن صفحه یا background اپ</td><td>پخش بدون حلقهٔ redraw یا polling زمان ادامه پیدا می‌کند.</td></tr>
+      <tr><td>تماس، پخش اپ دیگر، قطع هدفون یا Bluetooth</td><td>رفتار Audio Focus و becoming-noisy مربوط به Chromium/WebView روی دستگاه واقعی بررسی شود.</td></tr>
+      <tr><td>ردکردن Notification در Android 13+</td><td>پخش پایدار بماند؛ نمایش کنترل‌های نوتیفیکیشن مطابق محدودیت پلتفرم مستند شود.</td></tr>
+    </tbody></table>
+    <p>حداقل روی Android 8، 12 و 13+ و یک دستگاه با مدیریت باتری تهاجمی تست شود. یک تست ۲۰ تا ۳۰ دقیقه‌ای با پلیر داخلی تلگرام و ابزار Android Studio Energy Profiler یا <code>adb shell dumpsys batterystats</code> مقایسه شود.</p>
+  </section>
+
+  <section><h2>۹. چک‌لیست نگهداری</h2>
+    <ul>
+      <li>parse کردن eventهای رسانه متمرکز بماند؛ Bridge عادی و preserved باید دقیقاً یک اعتبارسنجی داشته باشند.</li>
+      <li>Bridge preserved دوباره به Bridge عمومی WebApp تبدیل نشود.</li>
+      <li>هنگام Minimize متد <code>release()</code> فراخوانی نشود؛ فقط Close کامل باید session را آزاد کند.</li>
+      <li>برای تغییر صرفاً position، نوتیفیکیشن یا artwork دوباره ساخته نشود.</li>
+      <li>هر فیلد جدید نیازمند validation، ذخیره در snapshot، رفتار restore و تعریف رفتار پس‌زمینه است.</li>
+      <li>پس از تغییر lifecycle WebView، کنترل نوتیفیکیشن در حالت Minimize دوباره تست شود.</li>
+    </ul>
+  </section>
+
+  <footer class="small"><p>این سند قابلیت سفارشی MediaPlayer در همین سورس اندروید را شرح می‌دهد و تا زمان پذیرش جداگانه، بخشی از API عمومی upstream تلگرام محسوب نمی‌شود.</p></footer>
+</main></body></html>

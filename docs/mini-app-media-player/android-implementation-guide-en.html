@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram Mini App Media Player — Android Implementation Guide</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f6f8fb; --card:#fff; --text:#172033; --muted:#5d687a; --line:#dbe1ea; --accent:#2878d0; --code:#eef3f8; --good:#147a48; --warn:#9a5b00; }
+    @media (prefers-color-scheme:dark){:root{--bg:#11151c;--card:#191f29;--text:#e8edf5;--muted:#a8b2c2;--line:#303949;--accent:#65aaf2;--code:#222a36;--good:#62ce94;--warn:#efb35d}}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif} main{max-width:1040px;margin:auto;padding:40px 22px 80px} h1{font-size:2.15rem;line-height:1.2;margin:.2em 0} h2{margin-top:2.2em;border-bottom:1px solid var(--line);padding-bottom:.35em} h3{margin-top:1.6em} p,li{max-width:88ch}.lead{font-size:1.08rem;color:var(--muted)} .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 22px;margin:18px 0}.good{border-left:4px solid var(--good)}.warn{border-left:4px solid var(--warn)} code{background:var(--code);padding:.12em .35em;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace} pre{background:var(--code);padding:16px;border-radius:10px;overflow:auto;line-height:1.5} table{border-collapse:collapse;width:100%;background:var(--card)} th,td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top} th{background:var(--code)} nav a{color:var(--accent);margin-right:16px} a{color:var(--accent)} .flow{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.small{font-size:.9rem;color:var(--muted)}
+  </style>
+</head>
+<body><main>
+  <header>
+    <p class="small">Android source documentation · Updated 2026-10-21</p>
+    <h1>Mini App Media Player — Android Implementation Guide</h1>
+    <p class="lead">Architecture and engineering rules for connecting media played by a Telegram Mini App WebView to Android MediaSession, a foreground notification, the in-app media bar, and minimized Mini App tabs.</p>
+    <nav><a href="#architecture">Architecture</a><a href="#bridge">Bridge</a><a href="#lifecycle">Lifecycle</a><a href="#security">Security</a><a href="#battery">Battery</a><a href="#testing">Testing</a></nav>
+  </header>
+
+  <section id="goals"><h2>1. Goals and boundaries</h2>
+    <ul>
+      <li>Expose Play/Pause and Seek outside the WebView through Android media controls.</li>
+      <li>Keep audio playback owned by the web page. Native code mirrors state and sends control requests; it does not decode or play the Mini App audio.</li>
+      <li>Preserve playback and controls when the Mini App is minimized or Telegram is in the background.</li>
+      <li>Avoid polling and repeated notification/artwork updates.</li>
+      <li>Keep the generic WebApp bridge detached after minimization; only the allowlisted media messages remain available.</li>
+    </ul>
+    <div class="card warn"><strong>Single active player:</strong> Android exposes one active Mini App media session. When another Mini App starts playing, the previous session receives a Pause request and loses active MediaSession status.</div>
+  </section>
+
+  <section id="architecture"><h2>2. Architecture</h2>
+    <div class="flow card">Mini App audio/video element
+  ⇅ Telegram.WebApp.MediaPlayer SDK
+WebView message bridge
+  ⇅ BotWebViewContainer.Delegate
+BotWebViewMediaBar + minimized WebTabData
+  ⇅ BotWebViewMediaSession
+Android MediaSessionCompat + BotWebViewMediaService notification
+  ⇅ BotWebViewMediaReceiver / MediaSession callback
+Control request returned to JavaScript</div>
+    <table>
+      <thead><tr><th>Component</th><th>Responsibility</th></tr></thead>
+      <tbody>
+        <tr><td><code>BotWebViewContainer</code></td><td>Receives and validates media bridge events, preserves a restricted media-only bridge while minimized, and sends native control requests back to JavaScript.</td></tr>
+        <tr><td><code>BotWebViewSheet</code> / <code>BotWebViewAttachedSheet</code></td><td>Own the delegate, synchronize the media bar and minimized-tab snapshot, bind callbacks, and distinguish minimize from full close.</td></tr>
+        <tr><td><code>BotWebViewMediaBar</code></td><td>In-app title, artwork, progress, loading state, Play/Pause, and Seek UI.</td></tr>
+        <tr><td><code>BottomSheetTabs.WebTabData</code></td><td>Stores a compact media snapshot while the sheet is minimized; estimates live position from elapsed realtime and playback rate.</td></tr>
+        <tr><td><code>BotWebViewMediaSession</code></td><td>Single source of truth for Android MediaSession state, notification content, active-session arbitration, Seek protection, and paused-session timeout.</td></tr>
+        <tr><td><code>BotWebViewMediaService</code></td><td>Hosts the media notification as a media-playback foreground service.</td></tr>
+        <tr><td><code>BotWebViewMediaReceiver</code></td><td>Handles explicit notification Play/Pause broadcasts.</td></tr>
+        <tr><td><code>LaunchActivity</code></td><td>Reopens the correct minimized Mini App when the notification is tapped.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="bridge"><h2>3. Bridge contract and data flow</h2>
+    <h3>Web → Android events</h3>
+    <table><thead><tr><th>Event</th><th>Use</th><th>Frequency</th></tr></thead><tbody>
+      <tr><td><code>web_app_set_media_metadata</code></td><td>Title, artist, cover URL, duration.</td><td>Once per track, or when metadata changes.</td></tr>
+      <tr><td><code>web_app_set_media_playback_state</code></td><td>Position, duration, playing, loading, playback rate.</td><td>On state transitions; position ticks only while visible.</td></tr>
+      <tr><td><code>web_app_clear_media_metadata</code></td><td>Ends the media session when nothing remains queued.</td><td>Only at a real end/teardown, not between playlist tracks.</td></tr>
+      <tr><td><code>web_app_set_media_bar_enabled</code></td><td>Shows or hides the in-sheet native media bar.</td><td>When preference changes.</td></tr>
+    </tbody></table>
+    <h3>Android → Web event</h3>
+    <p><code>media_playback_control_requested</code> contains either <code>{is_playing}</code> or <code>{seek_to}</code>. JavaScript applies the request to the actual media element and reports the settled state back.</p>
+    <div class="card good"><strong>Seek rule:</strong> never echo <code>audio.currentTime</code> immediately after assigning a new seek target. Native enters loading state and waits for <code>seeked</code>/<code>playing</code>; this prevents stale pre-seek positions from snapping the scrubber backwards.</div>
+  </section>
+
+  <section id="lifecycle"><h2>4. Lifecycle</h2>
+    <h3>Visible sheet</h3><p>The complete WebApp bridge is attached. Media events update the in-sheet bar, MediaSession, notification, and any existing tab snapshot.</p>
+    <h3>Minimized to a tab</h3><p>The WebView is preserved only when active media exists. The ordinary bridge is detached and <code>visibility_changed(false)</code> is delivered. A restricted media delegate accepts only the four allowlisted media events. Audio remains owned by the WebView.</p>
+    <h3>Restored</h3><p>The WebView and callback are rebound, <code>visibility_changed(true)</code> is delivered, and one full playback snapshot resynchronizes Native and Web state.</p>
+    <h3>Full close</h3><p>The MediaSession is released, the notification/service is stopped, artwork loading is cancelled, and the WebView is destroyed.</p>
+    <h3>Renderer crash</h3><p><code>onRenderProcessGone</code> clears media metadata immediately so stale controls and an orphan notification cannot survive a dead renderer.</p>
+    <h3>Long pause</h3><p>After 30 minutes continuously paused, the foreground service and notification are suspended. Metadata is retained in memory, so a later Play event can reactivate the session without requiring the page to resend track metadata.</p>
+  </section>
+
+  <section id="security"><h2>5. Security and input validation</h2>
+    <ul>
+      <li>WebMessage events are accepted only from the main frame.</li>
+      <li>The message source origin must equal the current top-level document origin.</li>
+      <li>After minimization, only media event names are allowlisted; all other WebApp APIs remain detached.</li>
+      <li>Maximum media payload size is 16 KiB.</li>
+      <li>Title and artist are trimmed and limited to 256 characters.</li>
+      <li>Cover URLs are limited to 2,048 characters and must have an HTTP(S) scheme and a host.</li>
+      <li>Position and duration must be finite, non-negative, and no greater than 5 hours.</li>
+      <li>Playback rate must be finite and between 0.1× and 16×.</li>
+      <li>Validation is performed in Native code even when the JavaScript SDK already validates the value. Web content can bypass SDK helpers.</li>
+      <li>PendingIntents are immutable, the service and receiver are not exported, and receiver intents address an explicit component and session key.</li>
+    </ul>
+  </section>
+
+  <section id="battery"><h2>6. Battery and performance rules</h2>
+    <ul>
+      <li>Background operation is event-driven. Do not send position once per second while minimized or when <code>document.hidden</code> is true.</li>
+      <li>Native estimates position using the last position, <code>SystemClock.elapsedRealtime()</code>, and playback rate.</li>
+      <li>The SDK coalesces accidental position-only background messages and flushes one snapshot after activation.</li>
+      <li>Android MediaSession receives position and speed, allowing the system to animate progress without notification reposts.</li>
+      <li>Notification content is reposted only when title, artist, artwork, playing, loading, or controllability changes.</li>
+      <li>Media metadata and album-art bitmap are sent to MediaSession only when their values change.</li>
+      <li>Minimized-tab time redraws and loading animation run only while their parent window is attached and visible.</li>
+      <li>Artwork uses the image loader/cache and requests a bounded display size. Do not submit a new cover URL on every progress event.</li>
+      <li>No additional WakeLock is acquired by this feature.</li>
+    </ul>
+  </section>
+
+  <section><h2>7. Android platform integration</h2>
+    <ul>
+      <li>The manifest declares <code>FOREGROUND_SERVICE_MEDIA_PLAYBACK</code> and registers <code>BotWebViewMediaService</code> with <code>foregroundServiceType="mediaPlayback"</code>.</li>
+      <li>The service uses the existing Telegram notification channel and starts with <code>startForegroundService</code>/<code>startForeground</code>.</li>
+      <li><code>PlaybackStateCompat</code> publishes Play, Pause, Play/Pause and Seek actions when controls are available. Loading or disconnected state temporarily disables unsafe transport actions.</li>
+      <li>A loading timeout prevents controls from remaining permanently stuck when a Mini App fails to acknowledge a request.</li>
+      <li>A pending-seek guard ignores stale position messages until the reported position reaches the target or the safety timeout expires.</li>
+    </ul>
+  </section>
+
+  <section id="testing"><h2>8. Required test matrix</h2>
+    <table><thead><tr><th>Scenario</th><th>Expected result</th></tr></thead><tbody>
+      <tr><td>Minimize during playback</td><td>Audio continues; tab and notification show advancing progress; no per-second Web bridge traffic.</td></tr>
+      <tr><td>Notification Play/Pause</td><td>Web media element changes state and Native receives confirmation.</td></tr>
+      <tr><td>Seek to buffered/unbuffered position</td><td>Immediate target UI, temporary loading state, no snap-back.</td></tr>
+      <tr><td>Change track while minimized</td><td>Metadata and artwork update once; session remains controllable.</td></tr>
+      <tr><td>Second Mini App starts playback</td><td>Previous Mini App receives Pause; new session becomes the only active system session.</td></tr>
+      <tr><td>Pause for 30 minutes</td><td>Foreground service and notification stop; later Play recreates them.</td></tr>
+      <tr><td>Renderer/process termination</td><td>No orphan notification or active MediaSession remains.</td></tr>
+      <tr><td>Screen off / app background</td><td>Playback continues without UI redraw loops or position polling.</td></tr>
+      <tr><td>Phone call, other audio, headset/Bluetooth disconnect</td><td>Verify Chromium/WebView audio-focus and becoming-noisy behavior on real devices.</td></tr>
+      <tr><td>Android 13+ notification denied</td><td>Playback remains stable; document the platform-dependent visibility of media notification controls.</td></tr>
+    </tbody></table>
+    <p>Test at minimum on Android 8, 12, and 13+, plus an OEM with aggressive battery management. Compare a 20–30 minute run against Telegram's native audio player using Android Studio Energy Profiler or <code>adb shell dumpsys batterystats</code>.</p>
+  </section>
+
+  <section><h2>9. Maintenance checklist</h2>
+    <ul>
+      <li>Keep media event parsing centralized; normal and preserved bridges must use identical validation.</li>
+      <li>Do not turn the preserved bridge back into a general-purpose WebApp bridge.</li>
+      <li>Do not call <code>release()</code> when minimizing; call it only for a full close.</li>
+      <li>Do not rebuild notifications or resend artwork for progress-only changes.</li>
+      <li>Any new media field needs validation, snapshot persistence, restore behavior, and background semantics.</li>
+      <li>When changing WebView lifecycle code, retest notification controls while the sheet is minimized.</li>
+    </ul>
+  </section>
+
+  <footer class="small"><p>This document describes the custom Mini App MediaPlayer extension in this Android source tree. It is not part of the upstream public Telegram Mini Apps API unless separately adopted there.</p></footer>
+</main></body></html>

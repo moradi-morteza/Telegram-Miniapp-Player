@@ -946,11 +946,16 @@ public class BottomSheetTabs extends FrameLayout {
             if (tab.mediaDurationMs > 0) {
                 final long position = tab.getMediaPositionMs();
                 s = base + "  ·  " + AndroidUtilities.formatShortDuration((int) (position / 1000)) + " / " + AndroidUtilities.formatShortDuration((int) (tab.mediaDurationMs / 1000));
-                if (tab.mediaPlaying && !tab.mediaLoading && position < tab.mediaDurationMs && !mediaTickScheduled) {
+                if (tab.mediaPlaying && !tab.mediaLoading && position < tab.mediaDurationMs
+                        && parentView.isAttachedToWindow() && parentView.isShown()
+                        && parentView.getWindowVisibility() == View.VISIBLE && !mediaTickScheduled) {
                     mediaTickScheduled = true;
                     parentView.postDelayed(() -> {
                         mediaTickScheduled = false;
-                        parentView.invalidate();
+                        if (parentView.isAttachedToWindow() && parentView.isShown()
+                                && parentView.getWindowVisibility() == View.VISIBLE) {
+                            parentView.invalidate();
+                        }
                     }, Math.max(50, 1000 - position % 1000));
                 }
             }
@@ -1073,7 +1078,10 @@ public class BottomSheetTabs extends FrameLayout {
                     loadingArcRect.set(cx - sz / 2f, cy - sz / 2f, cx + sz / 2f, cy + sz / 2f);
                     final float rotation = (SystemClock.uptimeMillis() % 1000) / 1000f * 360f;
                     canvas.drawArc(loadingArcRect, rotation, 270, false, loadingArcPaint);
-                    parentView.invalidate();
+                    if (parentView.isAttachedToWindow() && parentView.isShown()
+                            && parentView.getWindowVisibility() == View.VISIBLE) {
+                        parentView.invalidate();
+                    }
                 } else {
                     if (playPauseDrawable == null || playPauseDrawableIsPlaying != tab.mediaPlaying) {
                         playPauseDrawableIsPlaying = tab.mediaPlaying;
