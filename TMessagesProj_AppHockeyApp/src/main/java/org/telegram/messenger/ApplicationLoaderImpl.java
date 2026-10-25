@@ -11,8 +11,6 @@ import android.view.ViewGroup;
 
 import androidx.core.content.FileProvider;
 
-import com.google.firebase.crashlytics.FirebaseCrashlytics;
-
 import org.telegram.messenger.regular.BuildConfig;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.TLRPC;
@@ -44,37 +42,7 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
 
     @Override
     protected void startAppCenterInternal(Activity context) {
-        if (org.telegram.messenger.BuildConfig.DEBUG) {
-            return;
-        }
-        try {
-            if (BuildVars.DEBUG_VERSION) {
-                String userId = "" + UserConfig.getInstance(UserConfig.selectedAccount).clientUserId;
-                if (UserConfig.getInstance(UserConfig.selectedAccount).getCurrentUser() != null) {
-                    final String username = UserObject.getPublicUsername(UserConfig.getInstance(UserConfig.selectedAccount).getCurrentUser());
-                    if (!TextUtils.isEmpty(username))
-                        userId = "@" + username;
-                }
-                if (ConnectionsManager.getInstance(UserConfig.selectedAccount).isTestBackend()) {
-                    userId += " [TEST SERVER]";
-                }
-
-                final FirebaseCrashlytics crashlytics = FirebaseCrashlytics.getInstance();
-                crashlytics.setUserId(userId);
-                crashlytics.setCustomKey("version", getVersionName(org.telegram.messenger.BuildConfig.VERSION_NUM));
-                crashlytics.setCustomKey("model", Build.MODEL);
-                crashlytics.setCustomKey("manufacturer", Build.MANUFACTURER);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    crashlytics.setCustomKey("soc_model", Build.SOC_MODEL);
-                    crashlytics.setCustomKey("soc_manufacturer", Build.SOC_MANUFACTURER);
-                }
-                crashlytics.setCustomKey("device", Build.DEVICE);
-                crashlytics.setCustomKey("product", Build.PRODUCT);
-                crashlytics.setCustomKey("hardware", Build.HARDWARE);
-                crashlytics.setCustomKey("user", Build.USER);
-                crashlytics.setCrashlyticsCollectionEnabled(true);
-            }
-            /*
+        /*
             if (BuildVars.DEBUG_VERSION) {
                 Distribute.setEnabledForDebuggableBuild(true);
                 String appHash = org.telegram.messenger.BuildConfig.APP_CENTER_HASH;
@@ -107,10 +75,7 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
                 }
                 AppCenter.setUserId(userId);
             }
-            */
-        } catch (Throwable e) {
-            FileLog.e(e);
-        }
+        */
     }
 
     private static long lastUpdateCheckTime;
@@ -130,11 +95,6 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
     }
 
     protected void appCenterLogInternal(Throwable e) {
-        try {
-            FirebaseCrashlytics.getInstance().recordException(e);
-        } catch (Throwable recordException) {
-            FileLog.e(recordException, false);
-        }
         try {
             // Crashes.trackError(e);
         } catch (Throwable ignore) {
