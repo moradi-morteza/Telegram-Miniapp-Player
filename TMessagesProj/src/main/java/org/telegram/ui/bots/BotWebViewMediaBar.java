@@ -40,7 +40,6 @@ public class BotWebViewMediaBar extends FrameLayout {
         default void onStateChanged() {}
     }
 
-    private static final int CORNER_RADIUS = 14;
     private static final int PADDING_H = 12;
     private static final int PADDING_V = 7;
     private static final int ARTWORK_SIZE = 40;
@@ -92,7 +91,10 @@ public class BotWebViewMediaBar extends FrameLayout {
 
         backgroundDrawable = new GradientDrawable();
         backgroundDrawable.setColor(backgroundColor);
-        backgroundDrawable.setCornerRadii(new float[]{dp(CORNER_RADIUS), dp(CORNER_RADIUS), dp(CORNER_RADIUS), dp(CORNER_RADIUS), 0, 0, 0, 0});
+        // The bar is edge-to-edge. Rounded top corners expose the sheet's default background
+        // through the transparent cut-outs (often white, especially with a dark Mini App).
+        // Keep the full-width surface square so the requested background color covers every pixel.
+        backgroundDrawable.setCornerRadius(0);
         setBackground(backgroundDrawable);
         setPadding(dp(PADDING_H), dp(PADDING_V), dp(PADDING_H), dp(PADDING_V));
 
