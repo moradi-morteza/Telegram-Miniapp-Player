@@ -265,6 +265,10 @@ public class BotWebViewAttachedSheet implements NotificationCenter.NotificationC
             tab.mediaPlaying = mediaBar.isPlaying();
             tab.mediaLoading = mediaBar.isLoading();
             tab.mediaBarEnabled = mediaBar.isMediaBarEnabled();
+            tab.mediaBarBackgroundColor = mediaBar.getBackgroundColorValue();
+            tab.mediaBarTextColor = mediaBar.getTextColorValue();
+            tab.mediaBarSecondaryTextColor = mediaBar.getSecondaryTextColorValue();
+            tab.mediaBarAccentColor = mediaBar.getAccentColorValue();
         }
         BotWebViewContainer.MyWebView webView = webViewContainer == null ? null : webViewContainer.getWebView();
         if (webView != null) {
@@ -307,6 +311,8 @@ public class BotWebViewAttachedSheet implements NotificationCenter.NotificationC
         // keeps arriving, which alone can't set hasMedia. Restore from the snapshot so the
         // bar (and the tab pill, if minimized again) don't silently lose the cover/time.
         if (mediaBar != null && tab.hasMedia) {
+            mediaBar.setMediaBarStyle(tab.mediaBarBackgroundColor, tab.mediaBarTextColor,
+                    tab.mediaBarSecondaryTextColor, tab.mediaBarAccentColor);
             mediaBar.setMetadata(tab.mediaTitle, tab.mediaArtist, tab.mediaCoverUrl, tab.mediaDurationMs);
             mediaBar.setPlaybackState(tab.getMediaPositionMs(), tab.mediaDurationMs, tab.mediaPlaying ? 1 : 0, tab.mediaLoading ? 1 : 0, tab.mediaPlaybackRate);
             mediaBar.setMediaBarEnabled(tab.mediaBarEnabled);
@@ -441,6 +447,10 @@ public class BotWebViewAttachedSheet implements NotificationCenter.NotificationC
         lastTab.mediaPlaying = mediaBar.isPlaying();
         lastTab.mediaLoading = mediaBar.isLoading();
         lastTab.mediaBarEnabled = mediaBar.isMediaBarEnabled();
+        lastTab.mediaBarBackgroundColor = mediaBar.getBackgroundColorValue();
+        lastTab.mediaBarTextColor = mediaBar.getTextColorValue();
+        lastTab.mediaBarSecondaryTextColor = mediaBar.getSecondaryTextColorValue();
+        lastTab.mediaBarAccentColor = mediaBar.getAccentColorValue();
         BottomSheetTabs bottomTabs = LaunchActivity.instance != null ? LaunchActivity.instance.getBottomSheetTabs() : null;
         if (bottomTabs != null) bottomTabs.invalidate();
     }
@@ -603,6 +613,17 @@ public class BotWebViewAttachedSheet implements NotificationCenter.NotificationC
                 }
                 if (mediaSession != null) mediaSession.setMediaBarEnabled(enabled);
                 if (mediaBar != null) mediaBar.setControllable(true);
+                syncTabMediaTitle();
+            }
+
+            @Override
+            public void onMediaBarStyleSet(String backgroundColor, String textColor,
+                                           String secondaryTextColor, String accentColor) {
+                if (mediaBar != null) {
+                    mediaBar.setMediaBarStyle(backgroundColor, textColor, secondaryTextColor, accentColor);
+                    mediaBar.setControllable(true);
+                }
+                if (mediaSession != null) mediaSession.onBridgeActivity();
                 syncTabMediaTitle();
             }
 

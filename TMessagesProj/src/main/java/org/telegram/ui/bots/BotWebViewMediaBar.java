@@ -3,6 +3,7 @@ package org.telegram.ui.bots;
 import static org.telegram.messenger.AndroidUtilities.dp;
 
 import android.content.Context;
+import android.graphics.Color;
 import android.graphics.drawable.ClipDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -70,6 +71,12 @@ public class BotWebViewMediaBar extends FrameLayout {
     private long pendingSeekStartedAt;
     private int loadingRequestId;
 
+    private int backgroundColor = Theme.getColor(Theme.key_windowBackgroundWhite);
+    private int textColor = Theme.getColor(Theme.key_windowBackgroundWhiteBlackText);
+    private int secondaryTextColor = Theme.getColor(Theme.key_windowBackgroundWhiteGrayText);
+    private int accentColor = Theme.getColor(Theme.key_windowBackgroundWhiteBlueIcon);
+
+    private final GradientDrawable backgroundDrawable;
     private final BackupImageView artwork;
     private final TextView titleView;
     private final TextView artistView;
@@ -83,10 +90,10 @@ public class BotWebViewMediaBar extends FrameLayout {
     public BotWebViewMediaBar(Context context) {
         super(context);
 
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-        background.setCornerRadii(new float[]{dp(CORNER_RADIUS), dp(CORNER_RADIUS), dp(CORNER_RADIUS), dp(CORNER_RADIUS), 0, 0, 0, 0});
-        setBackground(background);
+        backgroundDrawable = new GradientDrawable();
+        backgroundDrawable.setColor(backgroundColor);
+        backgroundDrawable.setCornerRadii(new float[]{dp(CORNER_RADIUS), dp(CORNER_RADIUS), dp(CORNER_RADIUS), dp(CORNER_RADIUS), 0, 0, 0, 0});
+        setBackground(backgroundDrawable);
         setPadding(dp(PADDING_H), dp(PADDING_V), dp(PADDING_H), dp(PADDING_V));
 
         LinearLayout row = new LinearLayout(context);
@@ -102,9 +109,9 @@ public class BotWebViewMediaBar extends FrameLayout {
         column.setOrientation(LinearLayout.VERTICAL);
         row.addView(column, LayoutHelper.createLinear(0, CONTENT_HEIGHT, 1f, Gravity.CENTER_VERTICAL, 10, 0, 0, 0));
 
-        titleView = textView(context, 14, Theme.key_windowBackgroundWhiteBlackText, true);
+        titleView = textView(context, 14, textColor, true);
         column.addView(titleView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, TITLE_HEIGHT));
-        artistView = textView(context, 12, Theme.key_windowBackgroundWhiteGrayText, false);
+        artistView = textView(context, 12, secondaryTextColor, false);
         column.addView(artistView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, ARTIST_HEIGHT));
 
         LinearLayout transport = new LinearLayout(context);
@@ -112,13 +119,13 @@ public class BotWebViewMediaBar extends FrameLayout {
         transport.setGravity(Gravity.CENTER_VERTICAL);
         column.addView(transport, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, SEEKBAR_HEIGHT, 0, 3, 0, 0));
 
-        elapsedTime = textView(context, 10, Theme.key_windowBackgroundWhiteGrayText, false);
+        elapsedTime = textView(context, 10, secondaryTextColor, false);
         transport.addView(elapsedTime, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0, 0, 8, 0));
 
         seekBar = buildSeekBar(context);
         transport.addView(seekBar, LayoutHelper.createLinear(0, SEEKBAR_HEIGHT, 1f));
 
-        remainingTime = textView(context, 10, Theme.key_windowBackgroundWhiteGrayText, false);
+        remainingTime = textView(context, 10, secondaryTextColor, false);
         transport.addView(remainingTime, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 8, 0, 0, 0));
 
         FrameLayout playPauseSlot = new FrameLayout(context);
@@ -126,11 +133,11 @@ public class BotWebViewMediaBar extends FrameLayout {
 
         playPause = new ImageView(context);
         playPauseDrawable = new PlayPauseDrawable(18);
-        playPauseDrawable.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueIcon));
+        playPauseDrawable.setColor(accentColor);
         playPauseDrawable.setParent(playPause);
         playPause.setImageDrawable(playPauseDrawable);
         playPause.setScaleType(ImageView.ScaleType.CENTER);
-        playPause.setBackground(Theme.createSelectorDrawable(Theme.getColor(Theme.key_listSelector), 1));
+        playPause.setBackground(Theme.createSelectorDrawable(Theme.multAlpha(accentColor, 0.18f), 1));
         playPause.setOnClickListener(v -> {
             if (!loading && controllable && callback != null) {
                 applyPlayPauseRequest(!playing);
@@ -142,7 +149,7 @@ public class BotWebViewMediaBar extends FrameLayout {
         loadingSpinner = new RadialProgressView(context);
         loadingSpinner.setSize(dp(18));
         loadingSpinner.setStrokeWidth(2f);
-        loadingSpinner.setProgressColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueIcon));
+        loadingSpinner.setProgressColor(accentColor);
         playPauseSlot.addView(loadingSpinner, LayoutHelper.createFrame(24, 24, Gravity.CENTER));
 
         setVisibility(GONE);
@@ -156,8 +163,8 @@ public class BotWebViewMediaBar extends FrameLayout {
         bar.setSplitTrack(false);
 
         int inset = (int) ((dp(SEEKBAR_HEIGHT) - dp(SEEKBAR_LINE_HEIGHT)) / 2f);
-        Drawable track = new InsetDrawable(pill(Theme.multAlpha(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText), 0.3f)), 0, inset, 0, inset);
-        Drawable progress = new ClipDrawable(new InsetDrawable(pill(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText)), 0, inset, 0, inset), Gravity.LEFT, ClipDrawable.HORIZONTAL);
+        Drawable track = new InsetDrawable(pill(Theme.multAlpha(secondaryTextColor, 0.3f)), 0, inset, 0, inset);
+        Drawable progress = new ClipDrawable(new InsetDrawable(pill(accentColor), 0, inset, 0, inset), Gravity.LEFT, ClipDrawable.HORIZONTAL);
         LayerDrawable progressDrawable = new LayerDrawable(new Drawable[]{track, progress});
         progressDrawable.setId(0, android.R.id.background);
         progressDrawable.setId(1, android.R.id.progress);
@@ -165,7 +172,7 @@ public class BotWebViewMediaBar extends FrameLayout {
 
         GradientDrawable thumb = new GradientDrawable();
         thumb.setShape(GradientDrawable.OVAL);
-        thumb.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+        thumb.setColor(accentColor);
         thumb.setSize(dp(SEEKBAR_THUMB_SIZE), dp(SEEKBAR_THUMB_SIZE));
         bar.setThumb(thumb);
 
@@ -198,10 +205,10 @@ public class BotWebViewMediaBar extends FrameLayout {
         return drawable;
     }
 
-    private TextView textView(Context context, int size, int colorKey, boolean bold) {
+    private TextView textView(Context context, int size, int color, boolean bold) {
         TextView view = new TextView(context);
         view.setTextSize(size);
-        view.setTextColor(Theme.getColor(colorKey));
+        view.setTextColor(color);
         view.setSingleLine(true);
         view.setEllipsize(TextUtils.TruncateAt.END);
         view.setGravity(Gravity.CENTER_VERTICAL);
@@ -266,6 +273,49 @@ public class BotWebViewMediaBar extends FrameLayout {
         refresh();
     }
 
+    /** Applies only the supplied colors; null fields keep their current value. */
+    public void setMediaBarStyle(String backgroundColor, String textColor, String secondaryTextColor, String accentColor) {
+        if (backgroundColor != null) this.backgroundColor = Color.parseColor(backgroundColor);
+        if (textColor != null) this.textColor = Color.parseColor(textColor);
+        if (secondaryTextColor != null) this.secondaryTextColor = Color.parseColor(secondaryTextColor);
+        if (accentColor != null) this.accentColor = Color.parseColor(accentColor);
+        applyStyle();
+    }
+
+    /** Restores a complete style snapshot when a minimized Mini App is reopened. */
+    public void setMediaBarStyle(int backgroundColor, int textColor, int secondaryTextColor, int accentColor) {
+        this.backgroundColor = backgroundColor;
+        this.textColor = textColor;
+        this.secondaryTextColor = secondaryTextColor;
+        this.accentColor = accentColor;
+        applyStyle();
+    }
+
+    private void applyStyle() {
+        backgroundDrawable.setColor(backgroundColor);
+        titleView.setTextColor(textColor);
+        artistView.setTextColor(secondaryTextColor);
+        elapsedTime.setTextColor(secondaryTextColor);
+        remainingTime.setTextColor(secondaryTextColor);
+        playPauseDrawable.setColor(accentColor);
+        playPause.setBackground(Theme.createSelectorDrawable(Theme.multAlpha(accentColor, 0.18f), 1));
+        loadingSpinner.setProgressColor(accentColor);
+
+        int inset = (int) ((dp(SEEKBAR_HEIGHT) - dp(SEEKBAR_LINE_HEIGHT)) / 2f);
+        Drawable track = new InsetDrawable(pill(Theme.multAlpha(secondaryTextColor, 0.3f)), 0, inset, 0, inset);
+        Drawable progress = new ClipDrawable(new InsetDrawable(pill(accentColor), 0, inset, 0, inset), Gravity.LEFT, ClipDrawable.HORIZONTAL);
+        LayerDrawable progressDrawable = new LayerDrawable(new Drawable[]{track, progress});
+        progressDrawable.setId(0, android.R.id.background);
+        progressDrawable.setId(1, android.R.id.progress);
+        seekBar.setProgressDrawable(progressDrawable);
+        GradientDrawable thumb = new GradientDrawable();
+        thumb.setShape(GradientDrawable.OVAL);
+        thumb.setColor(accentColor);
+        thumb.setSize(dp(SEEKBAR_THUMB_SIZE), dp(SEEKBAR_THUMB_SIZE));
+        seekBar.setThumb(thumb);
+        invalidate();
+    }
+
     public void setControllable(boolean controllable) {
         this.controllable = controllable;
         refresh();
@@ -313,6 +363,10 @@ public class BotWebViewMediaBar extends FrameLayout {
     public boolean isPlaying() { return playing; }
     public boolean isLoading() { return loading; }
     public float getPlaybackRate() { return playbackRate; }
+    public int getBackgroundColorValue() { return backgroundColor; }
+    public int getTextColorValue() { return textColor; }
+    public int getSecondaryTextColorValue() { return secondaryTextColor; }
+    public int getAccentColorValue() { return accentColor; }
 
     private void refresh() {
         boolean visible = hasMedia && barEnabled;

@@ -1138,18 +1138,26 @@ public class BottomSheetTabs extends FrameLayout {
 
             final Text titleToDraw = combinedTitleText != null ? combinedTitleText : title;
             final float titleCy = artistText != null ? bounds.centerY() - dp(MEDIA_LINE_OFFSET) : bounds.centerY();
+            final float textLeft = bounds.left + dp(60) + leftPadding;
+            // A media tab has a dedicated play/pause touch target before the expand icon.
+            // Stop both text lines before that target instead of letting a long title draw
+            // underneath the control. Non-media tabs retain their original text width.
+            final float textRight = tab.hasMedia
+                    ? playPauseIconCx(bounds) - dp(22)
+                    : bounds.right - dp(40);
+            final int textWidth = Math.max(0, (int) (textRight - textLeft));
             if (overrideTitle != null) {
                 overrideTitle
-                    .ellipsize((int) (bounds.width() - dp(100) - leftPadding))
-                    .draw(canvas, bounds.left + dp(60) + leftPadding, titleCy, iconColor, (1f - expandProgress) * alpha * contentAlpha);
+                    .ellipsize(textWidth)
+                    .draw(canvas, textLeft, titleCy, iconColor, (1f - expandProgress) * alpha * contentAlpha);
             }
             titleToDraw
-                .ellipsize((int) (bounds.width() - dp(100) - leftPadding))
-                .draw(canvas, bounds.left + dp(60) + leftPadding, titleCy, iconColor, (overrideTitle == null ? 1f : expandProgress) * alpha * contentAlpha);
+                .ellipsize(textWidth)
+                .draw(canvas, textLeft, titleCy, iconColor, (overrideTitle == null ? 1f : expandProgress) * alpha * contentAlpha);
             if (artistText != null) {
                 artistText
-                    .ellipsize((int) (bounds.width() - dp(100) - leftPadding))
-                    .draw(canvas, bounds.left + dp(60) + leftPadding, bounds.centerY() + dp(MEDIA_LINE_OFFSET), Theme.multAlpha(iconColor, 0.65f), alpha * contentAlpha);
+                    .ellipsize(textWidth)
+                    .draw(canvas, textLeft, bounds.centerY() + dp(MEDIA_LINE_OFFSET), Theme.multAlpha(iconColor, 0.65f), alpha * contentAlpha);
             }
         }
 
@@ -1226,6 +1234,10 @@ public class BottomSheetTabs extends FrameLayout {
         public boolean mediaPlaying;
         public boolean mediaLoading;
         public boolean mediaBarEnabled = true;
+        public int mediaBarBackgroundColor;
+        public int mediaBarTextColor;
+        public int mediaBarSecondaryTextColor;
+        public int mediaBarAccentColor;
 
         public long getMediaPositionMs() {
             long position = mediaPositionMs;

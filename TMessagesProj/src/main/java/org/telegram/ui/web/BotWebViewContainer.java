@@ -1569,6 +1569,16 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                     delegate.onMediaBarEnabled(data.optBoolean("enabled", true));
                     return true;
                 }
+                case "web_app_set_media_bar_style": {
+                    JSONObject data = new JSONObject(eventData);
+                    delegate.onMediaBarStyleSet(
+                            sanitizeMediaColor(data, "background_color"),
+                            sanitizeMediaColor(data, "text_color"),
+                            sanitizeMediaColor(data, "secondary_text_color"),
+                            sanitizeMediaColor(data, "accent_color")
+                    );
+                    return true;
+                }
             }
         } catch (Exception e) {
             FileLog.e(e);
@@ -1583,6 +1593,13 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
         if (value == null) return "";
         value = value.trim();
         return value.length() <= maxLength ? value : value.substring(0, maxLength);
+    }
+
+    @Nullable
+    private static String sanitizeMediaColor(JSONObject data, String key) {
+        if (!data.has(key) || data.isNull(key)) return null;
+        String value = data.optString(key, "").trim();
+        return value.matches("^#[0-9a-fA-F]{6}$") ? value : null;
     }
 
     private static String sanitizeMediaCoverUrl(String value) {
@@ -1989,6 +2006,10 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                 break;
             }
             case "web_app_set_media_bar_enabled": {
+                dispatchPreservedMediaEvent(delegate, eventType, eventData);
+                break;
+            }
+            case "web_app_set_media_bar_style": {
                 dispatchPreservedMediaEvent(delegate, eventType, eventData);
                 break;
             }
@@ -3933,6 +3954,13 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
          * MediaPlayer bridge: Mini App wants the native transport bar shown/hidden (defaults to shown).
          */
         default void onMediaBarEnabled(boolean enabled) {}
+
+        /**
+         * MediaPlayer bridge: Mini App customizes the native in-sheet transport bar.
+         * Null values mean that color was omitted and should remain unchanged.
+         */
+        default void onMediaBarStyleSet(@Nullable String backgroundColor, @Nullable String textColor,
+                                        @Nullable String secondaryTextColor, @Nullable String accentColor) {}
     }
 
     public final static class PopupButton {
