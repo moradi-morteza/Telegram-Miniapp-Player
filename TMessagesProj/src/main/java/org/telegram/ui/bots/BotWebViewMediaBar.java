@@ -9,8 +9,14 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.InsetDrawable;
 import android.graphics.drawable.LayerDrawable;
+import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.os.SystemClock;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.TextPaint;
 import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -24,11 +30,12 @@ import org.telegram.ui.Components.BackupImageView;
 import org.telegram.ui.Components.LayoutHelper;
 import org.telegram.ui.Components.PlayPauseDrawable;
 import org.telegram.ui.Components.RadialProgressView;
+import org.telegram.ui.Components.TypefaceSpan;
 
 /**
  * Minimal transport bar for a Mini App's MediaPlayer bridge (web_app_set_media_metadata /
  * web_app_set_media_playback_state / web_app_clear_media_metadata / web_app_set_media_bar_enabled):
- * [cover | title / artist / seekbar | play-pause]. Reports play/pause/seek back to the page via
+ * [cover | "title / artist" / seekbar | play-pause]. Reports play/pause/seek back to the page via
  * {@link Callback}. Step 1 only -- no OS notification, no bottom-sheet-tabs integration; only
  * live while the Mini App's own page/sheet is open.
  */
@@ -44,12 +51,13 @@ public class BotWebViewMediaBar extends FrameLayout {
     private static final int PADDING_V = 7;
     private static final int ARTWORK_SIZE = 40;
     private static final int BUTTON_SIZE = 38;
-    private static final int TITLE_HEIGHT = 20;
-    private static final int ARTIST_HEIGHT = 18;
+    // Tall enough that descenders/dots of non-Latin scripts are not clipped and the line never
+    // overlaps the seek bar.
+    private static final int TITLE_HEIGHT = 26;
     private static final int SEEKBAR_HEIGHT = 20;
     private static final float SEEKBAR_LINE_HEIGHT = 3;
     private static final float SEEKBAR_THUMB_SIZE = 10;
-    private static final int CONTENT_HEIGHT = Math.max(ARTWORK_SIZE, TITLE_HEIGHT + ARTIST_HEIGHT + 3 + SEEKBAR_HEIGHT);
+    private static final int CONTENT_HEIGHT = Math.max(ARTWORK_SIZE, TITLE_HEIGHT + 3 + SEEKBAR_HEIGHT);
     public static final int HEIGHT_DP = CONTENT_HEIGHT + PADDING_V * 2;
 
     private Callback callback;
@@ -69,6 +77,13 @@ public class BotWebViewMediaBar extends FrameLayout {
     private long pendingSeekMs = -1;
     private long pendingSeekStartedAt;
     private int loadingRequestId;
+    private long lastTickAt;
+    private boolean tickScheduled;
+    private final Runnable ticker = () -> {
+        tickScheduled = false;
+        advanceLocalPosition();
+        scheduleTick();
+    };
 
     private int backgroundColor = Theme.getColor(Theme.key_windowBackgroundWhite);
     private int textColor = Theme.getColor(Theme.key_windowBackgroundWhiteBlackText);
@@ -77,8 +92,7 @@ public class BotWebViewMediaBar extends FrameLayout {
 
     private final GradientDrawable backgroundDrawable;
     private final BackupImageView artwork;
-    private final TextView titleView;
-    private final TextView artistView;
+    private final TitleArtistView titleView;
     private final ImageView playPause;
     private final PlayPauseDrawable playPauseDrawable;
     private final RadialProgressView loadingSpinner;
@@ -111,10 +125,10 @@ public class BotWebViewMediaBar extends FrameLayout {
         column.setOrientation(LinearLayout.VERTICAL);
         row.addView(column, LayoutHelper.createLinear(0, CONTENT_HEIGHT, 1f, Gravity.CENTER_VERTICAL, 10, 0, 0, 0));
 
-        titleView = textView(context, 14, textColor, true);
+        titleView = new TitleArtistView(context);
+        titleView.setTextSize(14);
+        titleView.setColors(textColor, secondaryTextColor);
         column.addView(titleView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, TITLE_HEIGHT));
-        artistView = textView(context, 12, secondaryTextColor, false);
-        column.addView(artistView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, ARTIST_HEIGHT));
 
         LinearLayout transport = new LinearLayout(context);
         transport.setOrientation(LinearLayout.HORIZONTAL);
@@ -122,12 +136,14 @@ public class BotWebViewMediaBar extends FrameLayout {
         column.addView(transport, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, SEEKBAR_HEIGHT, 0, 3, 0, 0));
 
         elapsedTime = textView(context, 10, secondaryTextColor, false);
+        elapsedTime.setTextDirection(TEXT_DIRECTION_LTR);
         transport.addView(elapsedTime, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0, 0, 8, 0));
 
         seekBar = buildSeekBar(context);
         transport.addView(seekBar, LayoutHelper.createLinear(0, SEEKBAR_HEIGHT, 1f));
 
         remainingTime = textView(context, 10, secondaryTextColor, false);
+        remainingTime.setTextDirection(TEXT_DIRECTION_LTR);
         transport.addView(remainingTime, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 8, 0, 0, 0));
 
         FrameLayout playPauseSlot = new FrameLayout(context);
@@ -248,6 +264,7 @@ public class BotWebViewMediaBar extends FrameLayout {
                 seekConfirmed = pendingSeekMs >= 0;
                 pendingSeekMs = -1;
                 this.positionMs = positionMs;
+                lastTickAt = SystemClock.elapsedRealtime();
             }
         }
         if (durationMs >= 0) this.durationMs = durationMs;
@@ -295,8 +312,7 @@ public class BotWebViewMediaBar extends FrameLayout {
 
     private void applyStyle() {
         backgroundDrawable.setColor(backgroundColor);
-        titleView.setTextColor(textColor);
-        artistView.setTextColor(secondaryTextColor);
+        titleView.setColors(textColor, secondaryTextColor);
         elapsedTime.setTextColor(secondaryTextColor);
         remainingTime.setTextColor(secondaryTextColor);
         playPauseDrawable.setColor(accentColor);
@@ -370,12 +386,65 @@ public class BotWebViewMediaBar extends FrameLayout {
     public int getSecondaryTextColorValue() { return secondaryTextColor; }
     public int getAccentColorValue() { return accentColor; }
 
+    /**
+     * Keeps the clock moving between the page's playback-state events. The page only reports while
+     * its JS runs; after the Mini App is minimized/reopened or the app is backgrounded those events
+     * can pause, which used to leave the timer frozen. Real events still overwrite this estimate.
+     */
+    private void advanceLocalPosition() {
+        final long now = SystemClock.elapsedRealtime();
+        if (lastTickAt > 0 && hasMedia && playing && !loading && !tracking && pendingSeekMs < 0 && durationMs > 0) {
+            positionMs = Math.min(durationMs, positionMs + (long) ((now - lastTickAt) * playbackRate));
+            refresh();
+        }
+        lastTickAt = now;
+    }
+
+    private void scheduleTick() {
+        if (tickScheduled || !hasMedia || !barEnabled || !playing || loading || durationMs <= 0
+                || !isAttachedToWindow() || getWindowVisibility() != VISIBLE) {
+            return;
+        }
+        tickScheduled = true;
+        if (lastTickAt <= 0) lastTickAt = SystemClock.elapsedRealtime();
+        postDelayed(ticker, 500);
+    }
+
+    private void stopTick() {
+        tickScheduled = false;
+        removeCallbacks(ticker);
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        lastTickAt = SystemClock.elapsedRealtime();
+        scheduleTick();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        stopTick();
+        super.onDetachedFromWindow();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility == VISIBLE) {
+            lastTickAt = SystemClock.elapsedRealtime();
+            scheduleTick();
+        } else {
+            stopTick();
+        }
+    }
+
     private void refresh() {
         boolean visible = hasMedia && barEnabled;
         setVisibility(visible ? VISIBLE : GONE);
         if (!visible) return;
-        titleView.setText(title);
-        artistView.setText(artist);
+        scheduleTick();
+        titleView.setContent(title, artist);
         playPauseDrawable.setPause(playing, true);
         final boolean controlsLoading = loading || !controllable;
         loadingSpinner.setVisibility(controlsLoading ? VISIBLE : GONE);
@@ -399,5 +468,108 @@ public class BotWebViewMediaBar extends FrameLayout {
         long remaining = Math.max(0, durationMs - position);
         elapsedTime.setText(AndroidUtilities.formatShortDuration((int) (position / 1000)));
         remainingTime.setText("-" + AndroidUtilities.formatShortDuration((int) (remaining / 1000)));
+    }
+
+    /**
+     * Single line "title / artist". The title is bold and the artist regular, both in the app font.
+     * The artist is always kept visible; only the title is ellipsized when the line is too long.
+     */
+    private static class TitleArtistView extends TextView {
+        private static final String SEPARATOR = " / ";
+        private static final float MAX_ARTIST_FRACTION = 0.6f;
+
+        private final TextPaint boldPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint regularPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private String title = "";
+        private String artist = "";
+        private int titleColor;
+        private int artistColor;
+        private int builtWidth = -1;
+        private String builtTitle;
+        private String builtArtist;
+        private int builtTitleColor;
+        private int builtArtistColor;
+        private float builtTextSize;
+
+        TitleArtistView(Context context) {
+            super(context);
+            setSingleLine(true);
+            setMaxLines(1);
+            setEllipsize(null);
+            setGravity(Gravity.CENTER_VERTICAL);
+            setTypeface(Typeface.DEFAULT);
+        }
+
+        void setColors(int titleColor, int artistColor) {
+            this.titleColor = titleColor;
+            this.artistColor = artistColor;
+            rebuild(builtWidth);
+        }
+
+        void setContent(String title, String artist) {
+            this.title = title == null ? "" : title;
+            this.artist = artist == null ? "" : artist;
+            rebuild(builtWidth);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            rebuild(MeasureSpec.getSize(widthMeasureSpec) - getPaddingLeft() - getPaddingRight());
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        }
+
+        private void rebuild(int width) {
+            if (width <= 0) {
+                width = builtWidth;
+            }
+            if (width > 0 && width == builtWidth && builtTitleColor == titleColor && builtArtistColor == artistColor
+                    && builtTextSize == getTextSize()
+                    && TextUtils.equals(builtTitle, title) && TextUtils.equals(builtArtist, artist)) {
+                return;
+            }
+            builtWidth = width;
+            builtTitle = title;
+            builtArtist = artist;
+            builtTitleColor = titleColor;
+            builtArtistColor = artistColor;
+            builtTextSize = getTextSize();
+
+            final Typeface boldFace = AndroidUtilities.bold();
+            final Typeface regularFace = Typeface.DEFAULT;
+            boldPaint.set(getPaint());
+            boldPaint.setTypeface(boldFace);
+            regularPaint.set(getPaint());
+            regularPaint.setTypeface(regularFace);
+
+            final String displayTitle = title;
+            final String displayArtist = artist;
+            String shownTitle = displayTitle;
+            String shownArtist = displayArtist;
+            if (width > 0) {
+                if (!TextUtils.isEmpty(shownArtist)) {
+                    shownArtist = TextUtils.ellipsize(shownArtist, regularPaint, width * MAX_ARTIST_FRACTION, TextUtils.TruncateAt.END).toString();
+                    float artistWidth = regularPaint.measureText(SEPARATOR + shownArtist);
+                    shownTitle = TextUtils.ellipsize(displayTitle, boldPaint, Math.max(0f, width - artistWidth), TextUtils.TruncateAt.END).toString();
+                } else {
+                    shownTitle = TextUtils.ellipsize(displayTitle, boldPaint, width, TextUtils.TruncateAt.END).toString();
+                }
+            }
+
+            SpannableStringBuilder text = new SpannableStringBuilder();
+            if (!TextUtils.isEmpty(shownTitle)) {
+                appendSpan(text, shownTitle, boldFace, titleColor);
+            }
+            if (!TextUtils.isEmpty(shownArtist)) {
+                appendSpan(text, TextUtils.isEmpty(shownTitle) ? shownArtist : SEPARATOR + shownArtist, regularFace, artistColor);
+            }
+            setText(text);
+        }
+
+        private static void appendSpan(SpannableStringBuilder builder, String value, Typeface typeface, int color) {
+            int start = builder.length();
+            builder.append(value);
+            builder.setSpan(new TypefaceSpan(typeface), start, builder.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            builder.setSpan(new ForegroundColorSpan(color), start, builder.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
     }
 }

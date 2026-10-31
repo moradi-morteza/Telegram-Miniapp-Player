@@ -1383,6 +1383,28 @@ public class BottomSheetTabs extends FrameLayout {
         }
     }
 
+    // The media tab's clock advances by re-invalidating once per second while drawn. That chain is
+    // only scheduled from draw(), and stops by design whenever the window is hidden (app in the
+    // background, screen off). Nothing restarted it on return, so the timer stayed frozen until
+    // some unrelated redraw. Restart it whenever the view becomes visible again.
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        invalidate();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility == VISIBLE) invalidate();
+    }
+
+    @Override
+    protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (visibility == VISIBLE) invalidate();
+    }
+
     private final HashSet<Runnable> invalidateListeners = new HashSet<>();
     private final HashSet<Runnable> relayoutListeners = new HashSet<>();
     public void listen(Runnable invalidate, Runnable relayout) {
