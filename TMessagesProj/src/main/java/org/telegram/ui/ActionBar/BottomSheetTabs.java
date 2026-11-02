@@ -301,7 +301,11 @@ public class BottomSheetTabs extends FrameLayout {
     }
 
     public ArrayList<TabDrawable> getTabDrawables() {
-        return getTabDrawables(this.currentAccount);
+        final ArrayList<TabDrawable> drawables = getTabDrawables(this.currentAccount);
+        for (int i = 0; i < drawables.size(); ++i) {
+            drawables.get(i).rebind(this);
+        }
+        return drawables;
     }
 
     public ArrayList<WebTabData> getTabs(int currentAccount) {
@@ -767,7 +771,11 @@ public class BottomSheetTabs extends FrameLayout {
     public static class TabDrawable {
 
         public final WebTabData tab;
-        public final View parentView;
+        // Tabs (and their drawables) live in static per-account lists and outlive the Activity: after
+        // the app is closed with back and reopened, a NEW BottomSheetTabs view draws the OLD drawables.
+        // parentView must therefore be re-pointed at the view that is actually on screen (rebind()),
+        // otherwise the media clock, loading arc and animations keep invalidating a dead view.
+        public View parentView;
 
         private int position;
         public int index;
@@ -825,6 +833,15 @@ public class BottomSheetTabs extends FrameLayout {
         }};
         private final RectF loadingArcRect = new RectF();
 
+        public void rebind(View view) {
+            if (parentView == view) return;
+            parentView = view;
+            closeRipple.setCallback(view);
+            // A pending tick was posted on the old view and will never run on the new one.
+            mediaTickScheduled = false;
+            view.invalidate();
+        }
+
         public TabDrawable(View view, WebTabData tab) {
             parentView = view;
             this.tab = tab;
@@ -842,8 +859,8 @@ public class BottomSheetTabs extends FrameLayout {
             iconPaint.setStrokeJoin(Paint.Join.ROUND);
             iconPaint.setStrokeCap(Paint.Cap.ROUND);
 
-            animatedPosition = new AnimatedFloat(view, 320, CubicBezierInterpolator.EASE_OUT_QUINT);
-            animatedAlpha = new AnimatedFloat(view, 320, CubicBezierInterpolator.EASE_OUT_QUINT);
+            animatedPosition = new AnimatedFloat(() -> parentView.invalidate(), 320, CubicBezierInterpolator.EASE_OUT_QUINT);
+            animatedAlpha = new AnimatedFloat(() -> parentView.invalidate(), 320, CubicBezierInterpolator.EASE_OUT_QUINT);
 
             this.favicon = tab.favicon;
             CharSequence title = Emoji.replaceEmoji(tab.getTitle(), getTextPaint().getFontMetricsInt(), false);
