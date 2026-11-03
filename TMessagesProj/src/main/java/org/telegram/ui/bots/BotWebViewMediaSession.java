@@ -151,10 +151,23 @@ public class BotWebViewMediaSession {
 
     public void setMetadata(String title, String artist, String coverUrl, long durationMs) {
         onBridgeActivity();
-        this.title = trimToLength(title, 256);
-        this.artist = trimToLength(artist, 256);
+        final String newTitle = trimToLength(title, 256);
+        final String newArtist = trimToLength(artist, 256);
         coverUrl = validCoverUrl(coverUrl);
-        if (durationMs >= 0) this.durationMs = durationMs;
+        // A different track must not inherit the previous track's position or pending seek;
+        // re-publishing the same track (e.g. once its duration is known) must keep them.
+        final boolean trackChanged = hasMedia
+                && (!TextUtils.equals(newTitle, this.title) || !TextUtils.equals(newArtist, this.artist)
+                || !TextUtils.equals(coverUrl, this.coverUrl));
+        this.title = newTitle;
+        this.artist = newArtist;
+        if (trackChanged) {
+            this.positionMs = 0;
+            this.seekPending = false;
+            this.durationMs = durationMs >= 0 ? durationMs : 0;
+        } else if (durationMs >= 0) {
+            this.durationMs = durationMs;
+        }
         hasMedia = true;
         if (activeSession == null || activeSession == this) activate(false);
         if (!TextUtils.equals(this.coverUrl, coverUrl)) {
